@@ -251,7 +251,7 @@ onMounted(() => { loadData(); loadHealth() })
           <Activity class="mr-2 h-4 w-4" :class="healthChecking ? 'animate-pulse' : ''" />
           {{ healthChecking ? '检测中...' : '健康检测' }}
         </Button>
-        <Button @click="openAdd">
+        <Button data-guide="add-channel" @click="openAdd">
           <Plus class="mr-2 h-4 w-4" />添加渠道
         </Button>
       </div>
@@ -340,7 +340,7 @@ onMounted(() => { loadData(); loadHealth() })
             <Button variant="outline" size="sm" @click="onTestCard(ch)" :loading="cardTesting[ch.id]">
               <Activity class="mr-1 h-3 w-3" />测试连接
             </Button>
-            <Button variant="outline" size="sm" @click="onSync(ch)" :loading="cardSyncing[ch.id]">
+            <Button variant="outline" size="sm" data-guide="sync-models" @click="onSync(ch)" :loading="cardSyncing[ch.id]">
               <RefreshCw class="mr-1 h-3 w-3" />同步模型
             </Button>
             <Button variant="ghost" size="sm" @click="openEdit(ch)">

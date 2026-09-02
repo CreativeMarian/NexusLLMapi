@@ -9,7 +9,7 @@ import CardDescription from '@/components/ui/CardDescription.vue'
 import Button from '@/components/ui/Button.vue'
 import Input from '@/components/ui/Input.vue'
 import Switch from '@/components/ui/Switch.vue'
-import { Save, Settings2, Gauge, RotateCcw, FileText, Copy, Check, CheckCircle, Globe } from 'lucide-vue-next'
+import { Save, Settings2, Gauge, RotateCcw, FileText, Copy, Check, CheckCircle, Globe, MonitorSmartphone, Bot, Code2, HelpCircle, Terminal } from 'lucide-vue-next'
 
 const loading = ref(true)
 const saving = ref(false)
@@ -70,6 +70,39 @@ async function copyConfig() {
   } catch (e) {
     // 非安全上下文（http）或用户拒绝：剪贴板 API 会 reject，给出回退提示
     alert('复制失败，请手动选择上方文本复制')
+  }
+}
+
+// ===== 客户端接入信息（由原「快速开始」页迁移而来） =====
+const clientCopied = ref('')
+const clientConfigs = computed(() => ({
+  openai: `Base URL: http://127.0.0.1:${form.value.port}/v1
+API Key: sk-nexus（任意非空值）
+Model: 从模型库复制（如 meta/llama-3.1-8b-instruct）`,
+  claude: `网关 URL: http://127.0.0.1:${form.value.port}（注意不带 /v1）
+API Key: sk-nexus
+Auth: bearer
+Model: anthropic/claude-3-5-sonnet（需先在模型库设置别名）`,
+  python: `from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://127.0.0.1:${form.value.port}/v1",
+    api_key="sk-nexus"
+)
+
+resp = client.chat.completions.create(
+    model="meta/llama-3.1-8b-instruct",
+    messages=[{"role": "user", "content": "你好"}],
+)
+print(resp.choices[0].message.content)`
+}))
+async function copyClientConfig(key) {
+  try {
+    await navigator.clipboard.writeText(clientConfigs.value[key])
+    clientCopied.value = key
+    setTimeout(() => clientCopied.value = '', 2000)
+  } catch (e) {
+    alert('复制失败，请手动选择文本复制')
   }
 }
 
@@ -218,6 +251,143 @@ onMounted(loadData)
                 <Check v-if="copied" class="h-4 w-4 text-brand-green" />
                 <Copy v-else class="h-4 w-4" />
               </button>
+            </div>
+          </CardContent>
+        </Card>
+
+        <!-- 客户端接入（由原「快速开始」页迁移） -->
+        <Card class="flex flex-col lg:col-span-2">
+          <CardHeader>
+            <div class="flex items-center gap-2">
+              <MonitorSmartphone class="h-5 w-5 text-brand-blue" />
+              <CardTitle>客户端接入</CardTitle>
+            </div>
+            <CardDescription>把网关接入 OpenAI 兼容客户端、Claude Code 或代码调用</CardDescription>
+          </CardHeader>
+          <CardContent class="flex flex-1 flex-col space-y-6">
+            <!-- OpenAI 兼容客户端 -->
+            <div>
+              <div class="flex items-center gap-2">
+                <MonitorSmartphone class="h-4 w-4 text-brand-blue" />
+                <h4 class="text-sm font-semibold">OpenAI 兼容客户端（Cherry Studio / Trae / Cursor / ChatBox）</h4>
+              </div>
+              <div class="mt-2 space-y-1.5">
+                <div class="flex items-center gap-2 rounded-lg border border-border/40 bg-card/40 px-3 py-2">
+                  <span class="w-16 shrink-0 text-xs text-muted-foreground">Base URL</span>
+                  <code class="min-w-0 flex-1 truncate font-mono text-xs text-primary">http://127.0.0.1:{{ form.port }}/v1</code>
+                  <button class="rounded p-1 text-muted-foreground hover:text-primary" title="复制全部配置" @click="copyClientConfig('openai')">
+                    <Check v-if="clientCopied === 'openai'" class="h-3.5 w-3.5 text-brand-green" />
+                    <Copy v-else class="h-3.5 w-3.5" />
+                  </button>
+                </div>
+                <div class="flex items-center gap-2 rounded-lg border border-border/40 bg-card/40 px-3 py-2">
+                  <span class="w-16 shrink-0 text-xs text-muted-foreground">API Key</span>
+                  <code class="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground">sk-nexus（任意非空值）</code>
+                </div>
+                <div class="flex items-center gap-2 rounded-lg border border-border/40 bg-card/40 px-3 py-2">
+                  <span class="w-16 shrink-0 text-xs text-muted-foreground">Model ID</span>
+                  <code class="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground">从「模型库」点击模型卡片复制，如 meta/llama-3.1-8b-instruct</code>
+                </div>
+              </div>
+              <p class="mt-1.5 text-xs text-muted-foreground">模型 ID 大小写与斜杠必须与模型库完全一致，否则报「模型不存在」。</p>
+            </div>
+
+            <!-- Claude Code -->
+            <div>
+              <div class="flex items-center gap-2">
+                <Bot class="h-4 w-4 text-brand-purple" />
+                <h4 class="text-sm font-semibold">Claude Code（Anthropic 协议）</h4>
+              </div>
+              <div class="mt-2 space-y-1.5">
+                <div class="flex items-center gap-2 rounded-lg border border-border/40 bg-card/40 px-3 py-2">
+                  <span class="w-16 shrink-0 text-xs text-muted-foreground">网关 URL</span>
+                  <code class="min-w-0 flex-1 truncate font-mono text-xs text-primary">http://127.0.0.1:{{ form.port }}</code>
+                  <button class="rounded p-1 text-muted-foreground hover:text-primary" title="复制全部配置" @click="copyClientConfig('claude')">
+                    <Check v-if="clientCopied === 'claude'" class="h-3.5 w-3.5 text-brand-green" />
+                    <Copy v-else class="h-3.5 w-3.5" />
+                  </button>
+                </div>
+                <div class="flex items-center gap-2 rounded-lg border border-border/40 bg-card/40 px-3 py-2">
+                  <span class="w-16 shrink-0 text-xs text-muted-foreground">Model ID</span>
+                  <code class="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground">anthropic/claude-3-5-sonnet（在模型库设置别名）</code>
+                </div>
+              </div>
+              <p class="mt-1.5 text-xs text-muted-foreground">
+                网关 URL 带 /v1 会拼成 /v1/v1/messages 导致 404，这是最常见的错误。
+              </p>
+            </div>
+
+            <!-- 代码调用 -->
+            <div>
+              <div class="flex items-center gap-2">
+                <Code2 class="h-4 w-4 text-brand-green" />
+                <h4 class="text-sm font-semibold">代码调用（Python）</h4>
+              </div>
+              <div class="relative mt-2">
+                <pre class="overflow-x-auto rounded-xl bg-slate-950/90 p-3 text-xs leading-relaxed text-slate-100 ring-1 ring-white/10">from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:{{ form.port }}/v1", api_key="sk-nexus")
+resp = client.chat.completions.create(model="meta/llama-3.1-8b-instruct", messages=[{"role": "user", "content": "你好"}])
+print(resp.choices[0].message.content)</pre>
+                <button class="absolute right-2 top-2 rounded-lg p-1.5 text-slate-400 backdrop-blur transition-colors hover:bg-white/10 hover:text-white" @click="copyClientConfig('python')">
+                  <Check v-if="clientCopied === 'python'" class="h-4 w-4 text-brand-green" />
+                  <Copy v-else class="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        <!-- 常见问题（由原「快速开始」页迁移） -->
+        <Card class="flex flex-col lg:col-span-2">
+          <CardHeader>
+            <div class="flex items-center gap-2">
+              <HelpCircle class="h-5 w-5 text-brand-orange" />
+              <CardTitle>常见问题</CardTitle>
+            </div>
+            <CardDescription>接入网关时最常见的几个问题</CardDescription>
+          </CardHeader>
+          <CardContent class="flex flex-1 flex-col">
+            <div class="grid gap-4 md:grid-cols-2">
+              <div class="rounded-xl border border-border/40 bg-card/40 p-4">
+                <h4 class="text-sm font-medium">Base URL 怎么填？</h4>
+                <p class="mt-1 text-xs leading-relaxed text-muted-foreground">
+                  OpenAI 兼容客户端填 <code class="text-brand-blue">http://127.0.0.1:{{ form.port }}/v1</code>（带 /v1）。
+                  Claude Code 填 <code class="text-brand-blue">http://127.0.0.1:{{ form.port }}</code>（不带 /v1）。
+                </p>
+              </div>
+              <div class="rounded-xl border border-border/40 bg-card/40 p-4">
+                <h4 class="text-sm font-medium">API Key 填什么？</h4>
+                <p class="mt-1 text-xs leading-relaxed text-muted-foreground">
+                  客户端连网关填任意值（如 <code class="text-brand-blue">sk-nexus</code>），网关不校验。
+                  上游服务商的 Key 配置在「渠道管理」里。
+                </p>
+              </div>
+              <div class="rounded-xl border border-border/40 bg-card/40 p-4">
+                <h4 class="text-sm font-medium">模型 ID 从哪来？</h4>
+                <p class="mt-1 text-xs leading-relaxed text-muted-foreground">
+                  在模型库点击模型卡片即可复制完整 ID，必须与模型库完全一致（含大小写与斜杠）。
+                  Claude Code 需要使用 <code class="text-brand-blue">anthropic/</code> 开头的别名。
+                </p>
+              </div>
+              <div class="rounded-xl border border-border/40 bg-card/40 p-4">
+                <h4 class="text-sm font-medium">渠道停用后请求还在走？</h4>
+                <p class="mt-1 text-xs leading-relaxed text-muted-foreground">
+                  渠道启停会热重载立即生效。触发限流或预算熔断的渠道会进入冷却状态，到期自动恢复。
+                </p>
+              </div>
+              <div class="rounded-xl border border-border/40 bg-card/40 p-4">
+                <h4 class="text-sm font-medium">仪表盘没有数据？</h4>
+                <p class="mt-1 text-xs leading-relaxed text-muted-foreground">
+                  仪表盘只统计经过网关代理的请求。确认客户端 Base URL 指向了网关，而不是直连上游。
+                </p>
+              </div>
+              <div class="rounded-xl border border-border/40 bg-card/40 p-4">
+                <h4 class="text-sm font-medium">密钥安全吗？</h4>
+                <p class="mt-1 text-xs leading-relaxed text-muted-foreground">
+                  所有密钥明文保存在本机 SQLite 数据库中，仅供本机使用，不会上传到任何第三方。
+                </p>
+              </div>
             </div>
           </CardContent>
         </Card>

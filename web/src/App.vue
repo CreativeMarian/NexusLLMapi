@@ -3,19 +3,20 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   LayoutDashboard, Plug, Cpu, Settings, ScrollText,
-  Menu, X, Zap, Rocket, Sun, Moon, Terminal, Activity
+  Menu, X, Sun, Moon, Terminal, Activity
 } from 'lucide-vue-next'
 import { useTheme } from '@/composables/useTheme'
 import ParticleBackground from '@/components/ParticleBackground.vue'
 import ClickEffect from '@/components/ClickEffect.vue'
+import OnboardingGuide from '@/components/OnboardingGuide.vue'
 
 const route = useRoute()
 const { theme, toggleTheme } = useTheme()
 const mobileMenuOpen = ref(false)
 const serviceRunning = ref(true)
+const onboardingOpen = ref(false)
 
 const navItems = [
-  { name: '快速开始', path: '/guide', icon: Rocket },
   { name: '仪表盘', path: '/', icon: LayoutDashboard },
   { name: '渠道管理', path: '/channels', icon: Plug },
   { name: '模型库', path: '/models', icon: Cpu },
@@ -27,14 +28,26 @@ const activeItem = computed(() =>
   navItems.find(i => i.path === route.path) || null
 )
 
+// 鼠标光斑跟随
+const cursorGlowOn = ref(false)
+function onPointerMove(e) {
+  const root = document.documentElement
+  root.style.setProperty('--cx', e.clientX + 'px')
+  root.style.setProperty('--cy', e.clientY + 'px')
+  cursorGlowOn.value = true
+}
+
 // 定期检查服务状态
 let healthTimer = null
 onMounted(() => {
   checkHealth()
   healthTimer = setInterval(checkHealth, 10000)
+  window.addEventListener('pointermove', onPointerMove, { passive: true })
+  maybeOpenOnboarding()
 })
 onUnmounted(() => {
   if (healthTimer) clearInterval(healthTimer)
+  window.removeEventListener('pointermove', onPointerMove)
 })
 async function checkHealth() {
   try {
@@ -44,11 +57,25 @@ async function checkHealth() {
     serviceRunning.value = false
   }
 }
+
+// 首次进入且尚无渠道时自动弹出新手引导
+let onboardingChecked = false
+async function maybeOpenOnboarding() {
+  if (onboardingChecked) return
+  onboardingChecked = true
+  try {
+    if (localStorage.getItem('nexus_onboarding_v1') === '1') return
+    const res = await fetch('/api/channels', { signal: AbortSignal.timeout(4000) })
+    const data = await res.json()
+    const list = Array.isArray(data) ? data : (data.data || [])
+    if (list.length === 0) onboardingOpen.value = true
+  } catch (e) { /* 服务不可用或异常时不打扰 */ }
+}
 </script>
 
 <template>
   <div class="relative min-h-screen overflow-x-hidden bg-background text-foreground">
-    <!-- ========== 背景特效层（极光 + 网格 + 粒子） ========== -->
+    <!-- ========== 背景特效层（极光 + 流光光带 + 网格 + 粒子 + 鼠标光斑） ========== -->
     <div class="pointer-events-none fixed inset-0 z-0 overflow-hidden" aria-hidden="true">
       <div
         class="aurora-blob h-[520px] w-[520px] bg-brand-blue/40"
@@ -62,6 +89,8 @@ async function checkHealth() {
         class="aurora-blob h-[420px] w-[420px] bg-brand-cyan/25"
         style="bottom: -140px; left: 28%; animation-delay: -13s;"
       />
+      <!-- 沉浸式流光光带 -->
+      <div class="aurora-stream" />
       <div
         class="absolute inset-0 opacity-[0.05]"
         style="background-image: linear-gradient(hsl(var(--foreground) / 0.5) 1px, transparent 1px), linear-gradient(90deg, hsl(var(--foreground) / 0.5) 1px, transparent 1px); background-size: 52px 52px;"
@@ -69,6 +98,9 @@ async function checkHealth() {
       <!-- 粒子网络 -->
       <ParticleBackground />
     </div>
+
+    <!-- 鼠标光斑（跟随光感） -->
+    <div class="cursor-glow" :class="cursorGlowOn ? 'on' : ''" aria-hidden="true" />
 
     <!-- ========== 顶部终端状态栏（uupm 终端美学） ========== -->
     <div class="relative z-40 border-b border-white/5 bg-black/30 backdrop-blur-md">
@@ -209,6 +241,9 @@ async function checkHealth() {
 
     <!-- 鼠标点击特效 -->
     <ClickEffect />
+
+    <!-- 首次使用新手引导（聚焦点击） -->
+    <OnboardingGuide v-model:open="onboardingOpen" />
   </div>
 </template>
 

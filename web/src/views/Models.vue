@@ -415,7 +415,7 @@ onMounted(async () => { await loadMeta(); loadData() })
         </p>
       </div>
       <div class="flex shrink-0 items-center gap-2">
-        <Button
+        <Button data-guide="check-models"
           :disabled="batchTesting"
           @click="onBatchTest"
         >
@@ -610,7 +610,7 @@ onMounted(async () => { await loadMeta(); loadData() })
                   <button class="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground" title="编辑别名" @click="openEdit(m)">
                     <Edit3 class="h-3.5 w-3.5" />
                   </button>
-                  <button class="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground" title="查看配置" @click="openConfig(m)">
+                  <button class="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground" data-guide="copy-config" title="查看配置" @click="openConfig(m)">
                     <Settings class="h-3.5 w-3.5" />
                   </button>
                   <button
