@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NexusLLMapi - 大模型中转网关</title>
+    <script>
+      // 在页面渲染前应用主题，避免闪烁（深色为默认；?theme=light|dark 可覆盖预览）
+      (function() {
+        var q = new URLSearchParams(location.search).get('theme');
+        var theme = (q === 'light' || q === 'dark') ? q : (localStorage.getItem('nexus-theme') || 'dark');
+        if (theme === 'light') {
+          document.documentElement.classList.add('light');
+        } else {
+          document.documentElement.classList.add('dark');
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

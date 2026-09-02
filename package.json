@@ -1,0 +1,60 @@
+{
+  "name": "nexus-llm-api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0",
+    "npm": ">=10.0.0"
+  },
+  "scripts": {
+    "dev": "concurrently -k -n API,WEB -c blue,green \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:web": "vite --config web/vite.config.ts",
+    "dev:server": "tsx watch server/main.ts --worker",
+    "build:web": "vite build --config web/vite.config.ts",
+    "build:server": "tsc -p tsconfig.build.json",
+    "build": "npm run build:web && npm run build:server",
+    "start": "node dist-server/main.js",
+    "worker": "tsx server/main.ts --worker",
+    "typecheck": "tsc --noEmit",
+    "test": "set \"NODE_OPTIONS=--expose-gc\" && vitest run",
+    "test:watch": "vitest",
+    "open": "npm start",
+    "prestart": "node scripts/ensure-build.cjs"
+  },
+  "dependencies": {
+    "@fastify/static": "^7.0.4",
+    "axios": "^1.6.8",
+    "better-sqlite3": "13.0.3",
+    "class-variance-authority": "^0.7.0",
+    "clsx": "^2.1.0",
+    "fastify": "^4.29.0",
+    "lucide-vue-next": "^0.363.0",
+    "pinia": "^2.1.7",
+    "radix-vue": "^1.6.1",
+    "socks-proxy-agent": "^8.0.5",
+    "tailwind-merge": "^2.2.2",
+    "vue": "^3.4.21",
+    "vue-router": "^4.3.0",
+    "@vueuse/core": "^10.9.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^20.14.0",
+    "@vitejs/plugin-vue": "^5.0.4",
+    "autoprefixer": "^10.4.19",
+    "concurrently": "^8.2.2",
+    "postcss": "^8.4.38",
+    "tailwindcss": "^3.4.3",
+    "tailwindcss-animate": "^1.0.7",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10",
+    "vitest": "^2.1.5"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "esbuild@0.21.5": true,
+    "vue-demi@0.14.10": true
+  }
+}

@@ -1,0 +1,38 @@
+# Node
+node_modules/
+dist-server/
+web/dist/
+web/.vite/
+web/node_modules/
+
+# Data（SQLite 数据库与运行时产物不入库）
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+config.json
+
+# Go 旧版源码归档（如仍需参考，保留在仓库内；这里默认忽略）
+legacy-go/
+backup-before-node-*/
+*.exe
+*.exe~
+
+# 测试临时产物
+tests/fixtures/.exit-once-marker
+
+# 临时文件
+*.tmp
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
