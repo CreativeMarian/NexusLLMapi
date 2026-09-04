@@ -222,6 +222,8 @@ curl http://127.0.0.1:8787/v1/images/generations \
   -d '{"model": "图像模型ID", "prompt": "a cat"}'
 ```
 
+> 更多 Agent（Claude Code / Cursor / Dify / Continue / MCP 工具 / 远程服务器 SSH 隧道）的完整接入配置见 [docs/agent-integration.md](docs/agent-integration.md)。
+
 ---
 
 ## API 参考
