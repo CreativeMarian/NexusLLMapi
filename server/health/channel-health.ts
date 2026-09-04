@@ -43,19 +43,23 @@ export class ChannelHealthService {
   private running = false;
   private timer: NodeJS.Timeout | null = null;
   private lastCheckedAt = 0;
+  private lastIntervalSec = -1;
+  private unsubscribe: (() => void) | null = null;
 
   constructor(private ctx: RuntimeContext) {}
 
   start(): void {
     this.arm();
-    // 热更新：channel_health_interval_sec 变更后重新调度定时器
-    this.ctx.config.subscribe((cfg) => this.arm(cfg.channel_health_interval_sec));
+    // 热更新：仅在 channel_health_interval_sec 实际变化时重新调度，避免无关配置更新重置检查相位
+    this.unsubscribe = this.ctx.config.subscribe((cfg) => this.arm(cfg.channel_health_interval_sec));
     // 启动后先做一次初始检测（不阻塞启动）
     void this.runOnce().catch(() => undefined);
   }
 
   private arm(intervalSec?: number): void {
     const sec = intervalSec ?? this.ctx.config.get('channel_health_interval_sec');
+    if (sec === this.lastIntervalSec && this.timer) return; // 间隔未变：不打断正在进行的调度
+    this.lastIntervalSec = sec;
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
@@ -70,6 +74,8 @@ export class ChannelHealthService {
       clearInterval(this.timer);
       this.timer = null;
     }
+    this.unsubscribe?.();
+    this.unsubscribe = null;
   }
 
   get isChecking(): boolean {
@@ -84,6 +90,11 @@ export class ChannelHealthService {
   }
 
   list(): ChannelHealth[] {
+    // 清理已删除渠道的残留记录（否则 summary 会因幽灵 fail 永远 degraded）
+    const currentIds = new Set(this.ctx.repos.channels.list().map((c) => c.id));
+    for (const id of [...this.results.keys()]) {
+      if (!currentIds.has(id)) this.results.delete(id);
+    }
     const arr = [...this.results.values()].sort((a, b) => a.channelId - b.channelId);
     // 补全新渠道
     for (const ch of this.ctx.repos.channels.list()) {

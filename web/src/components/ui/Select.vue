@@ -62,7 +62,7 @@ onUnmounted(() => document.removeEventListener('click', handleClickOutside))
     >
       <div
         v-if="open"
-        class="glass-strong absolute z-50 mt-1 max-h-60 w-full overflow-auto rounded-xl p-1 text-popover-foreground"
+        class="glass-strong absolute z-[1000] mt-1 max-h-60 w-full overflow-auto rounded-xl p-1 text-popover-foreground"
       >
         <div
           v-for="opt in options"

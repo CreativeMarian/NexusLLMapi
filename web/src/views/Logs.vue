@@ -92,6 +92,8 @@ async function onClear() {
 }
 
 function getStatusBadge(status) {
+  if (status == null) return { variant: 'secondary', text: '-' }
+  if (status === 0) return { variant: 'destructive', text: '失败' }
   if (status >= 200 && status < 300) return { variant: 'success', text: '成功' }
   if (status === 429) return { variant: 'warning', text: '限流' }
   if (status === 404) return { variant: 'destructive', text: '未找到' }
@@ -130,6 +132,12 @@ async function loadServerData() {
   finally { serverLoading.value = false }
 }
 
+// 筛选条件变更：与请求日志一致，先重置到第 1 页，否则在非首页时 offset 越界返回空列表
+function applyServerFilters() {
+  serverPage.value = 1
+  loadServerData()
+}
+
 async function loadServerStats() {
   try {
     const res = await getServerLogStats()
@@ -146,6 +154,7 @@ function getLevelBadge(level) {
 
 // ===== 通用函数 =====
 function formatDuration(ms) {
+  if (ms == null || ms === '') return '-'
   if (ms < 1000) return ms + 'ms'
   return (ms / 1000).toFixed(2) + 's'
 }
@@ -346,9 +355,9 @@ onMounted(async () => { await loadChannels(); loadData() })
           <div class="flex flex-wrap items-center gap-3">
             <div class="relative flex-1 min-w-[200px]">
               <Search class="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-              <Input v-model="serverKeyword" placeholder="搜索关键词（如：启动、错误、panic）..." class="pl-9" @keyup.enter="loadServerData" />
+              <Input v-model="serverKeyword" placeholder="搜索关键词（如：启动、错误、panic）..." class="pl-9" @keyup.enter="applyServerFilters" />
             </div>
-            <Select v-model="serverLevel" :options="levelOptions" class="w-32" @update:model-value="loadServerData" />
+            <Select v-model="serverLevel" :options="levelOptions" class="w-32" @update:model-value="applyServerFilters" />
           </div>
         </CardContent>
       </Card>

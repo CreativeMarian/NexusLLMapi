@@ -28,7 +28,15 @@ export default defineConfig({
   preview: {
     host: '127.0.0.1',
     port: 4173,
-    strictPort: true
+    strictPort: true,
+    // vite preview 下同样代理到后端，避免 build+preview 页面所有请求 404
+    proxy: {
+      '/api': { target: backend, changeOrigin: true },
+      '/v1': { target: backend, changeOrigin: true },
+      '/health': { target: backend, changeOrigin: true },
+      '/p': { target: backend, changeOrigin: true },
+      '/__nexus': { target: backend, changeOrigin: true }
+    }
   },
   build: {
     outDir: fileURLToPath(new URL('./dist', import.meta.url)),

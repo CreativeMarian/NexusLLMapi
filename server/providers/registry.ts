@@ -126,12 +126,15 @@ export function parseModelList(type: string, json: unknown): FetchedModel[] {
     return out;
   }
 
-  // OpenAI 形态：{data:[{id}]}，也兼容裸数组
+  // OpenAI 形态：{data:[{id}]}，也兼容裸数组与 Azure deployments 的 {value:[...]} 形态
+  type ListItem = { id?: string; name?: string };
   const arr = Array.isArray(json)
-    ? (json as Array<{ id?: string }>)
-    : ((json as { data?: Array<{ id?: string }> })?.data ?? []);
+    ? (json as ListItem[])
+    : ((json as { data?: ListItem[] })?.data ?? (json as { value?: ListItem[] })?.value ?? []);
   for (const item of arr) {
-    const id = String(item.id ?? '').trim();
+    // Azure deployment 项的 id 可能是完整资源路径，取最后一段作为模型/部署名
+    const raw = String(item?.name ?? item?.id ?? '').trim();
+    const id = raw.split('/').pop()?.trim() ?? '';
     if (!id) continue;
     const modal = detectModalType(id);
     if (spec.excludeModals?.includes(modal)) continue;
@@ -159,4 +162,17 @@ export function transformRequestBody(type: string, rawBody: string, fallbackMode
 export function modelsEndpoint(baseURL: string): string {
   const b = baseURL.replace(/\/+$/, '');
   return b.endsWith('/models') ? b : `${b}/models`;
+}
+
+/** 构造上游业务端点；Azure 需补 api-version 查询参数（取 extra.api_version，缺省用较新版本） */
+export function upstreamEndpoint(
+  baseURL: string,
+  path: string,
+  type: string,
+  extra: Record<string, string> = {},
+): string {
+  const url = `${baseURL.replace(/\/+$/, '')}${path.startsWith('/') ? path : '/' + path}`;
+  if (type !== 'azure') return url;
+  const ver = (extra.api_version || '2024-10-21').trim();
+  return `${url}${url.includes('?') ? '&' : '?'}api-version=${encodeURIComponent(ver)}`;
 }

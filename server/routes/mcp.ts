@@ -56,7 +56,11 @@ export function registerMcpRoutes(app: FastifyInstance, ctx: RuntimeContext) {
       } else {
         cfg.url = srv.url;
       }
-      result[srv.name] = cfg;
+      // 重名服务器导出时追加序号，避免后者覆盖前者
+      let key = srv.name || `server-${srv.id}`;
+      let n = 2;
+      while (key in result) key = `${srv.name}-${n++}`;
+      result[key] = cfg;
     }
     return { mcpServers: result };
   });
@@ -71,8 +75,10 @@ export function registerMcpRoutes(app: FastifyInstance, ctx: RuntimeContext) {
   app.post('/api/mcp', async (req) => {
     const body = (req.body ?? {}) as Partial<McpServer>;
     const now = new Date().toISOString();
+    // 生成唯一 id：毫秒时间戳放大 + 随机后缀，并确认不与现有记录冲突
+    let id = nextUniqueId((key) => s.get(key) !== undefined);
     const srv: McpServer = {
-      id: Date.now() % 100000,
+      id,
       name: String(body.name ?? ''),
       description: String(body.description ?? ''),
       type: String(body.type ?? 'stdio'),
@@ -110,11 +116,29 @@ export function registerMcpRoutes(app: FastifyInstance, ctx: RuntimeContext) {
     const raw = s.get(PREFIX + id);
     if (!raw) return reply.code(404).send({ error: 'MCP 服务器不存在' });
     const srv = safeParse(raw)!;
-    srv.enabled = Boolean((req.body as { enabled?: boolean })?.enabled);
+    // 布尔严格解析（避免空 body / "false" 字符串误判）
+    const rawEnabled = (req.body as { enabled?: unknown } | undefined)?.enabled;
+    srv.enabled =
+      typeof rawEnabled === 'boolean'
+        ? rawEnabled
+        : rawEnabled === 'true' || rawEnabled === '1'
+          ? true
+          : rawEnabled === 'false' || rawEnabled === '0'
+            ? false
+            : !srv.enabled;
     srv.updated_at = new Date().toISOString();
     s.set(PREFIX + id, JSON.stringify(srv));
     return { message: '切换成功', data: srv };
   });
+}
+
+/** 生成不与现有键冲突的唯一数字 id（毫秒时间戳放大 + 随机后缀） */
+function nextUniqueId(exists: (key: string) => boolean): number {
+  for (let i = 0; i < 100; i++) {
+    const candidate = Date.now() * 100 + Math.floor(Math.random() * 100);
+    if (!exists(PREFIX + candidate)) return candidate;
+  }
+  return Date.now() * 100 + Math.floor(Math.random() * 100);
 }
 
 function safeParse(raw: string): McpServer | null {

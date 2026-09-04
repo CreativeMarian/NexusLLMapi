@@ -14,7 +14,9 @@ export async function createApp(ctx: RuntimeContext, gateway: Gateway): Promise<
     logger: false,
     bodyLimit: 20 * 1024 * 1024,
     trustProxy: false,
-    connectionTimeout: 30_000,
+    // 必须禁用：connectionTimeout 映射为 socket 空闲超时，LLM 上游处理常超 30s，
+    // 会在网关等待上游期间把客户端连接连 socket 一起销毁（keep-alive 空闲由 keepAliveTimeout 管控）
+    connectionTimeout: 0,
     keepAliveTimeout: 65_000,
   });
 
@@ -26,18 +28,21 @@ export async function createApp(ctx: RuntimeContext, gateway: Gateway): Promise<
       done(null, {});
     }
   });
-  app.addContentTypeParser('*', { parseAs: 'string' }, (_req, body, done) => {
-    const text = String(body ?? '').trim();
-    if (!text) return done(null, {});
+  // 兜底解析器：文本类 body 尝试按 JSON 解析（保持 text/plain JSON 兼容），
+  // 二进制类（multipart/octet-stream 等）保留原始 Buffer，供 /p/* 透传原样转发
+  app.addContentTypeParser('*', { parseAs: 'buffer' }, (_req, body, done) => {
+    const buf = body as Buffer;
+    if (!buf || buf.length === 0) return done(null, {});
     try {
-      done(null, JSON.parse(text));
+      done(null, JSON.parse(buf.toString('utf-8')));
     } catch {
-      done(null, {});
+      done(null, buf);
     }
   });
 
-  // CORS：收敛策略——仅放行本地来源（localhost/127.0.0.1 任意端口）与 file://（null origin），
-  // 远程站点 Origin 一律不反射，防止任意网页跨站调用本地网关。
+  // CORS：收敛策略——仅放行本地来源（localhost/127.0.0.1 任意端口）。
+  // 不反射 Origin: null（file:// 页面与 sandbox iframe 均为 null origin），
+  // 防止任意本地 HTML / 网页内嵌沙箱 iframe 读取无鉴权的管理 API（含渠道密钥）。
   app.addHook('onRequest', async (req, reply) => {
     const origin = corsAllowedOrigin(req.headers.origin);
     if (origin) reply.header('Access-Control-Allow-Origin', origin);
@@ -98,11 +103,11 @@ export async function createApp(ctx: RuntimeContext, gateway: Gateway): Promise<
   return app;
 }
 
-/** CORS 放行判定：仅本地来源（localhost/127.0.0.1 任意端口）与 file://（null）返回 Origin，其余返回 null（不加 ACAO） */
+/** CORS 放行判定：仅本地来源（localhost/127.0.0.1 任意端口）返回 Origin，其余返回 null（不加 ACAO） */
 function corsAllowedOrigin(reqOrigin: string | string[] | undefined): string | null {
   if (reqOrigin === undefined || reqOrigin === null) return null;
   const origin = Array.isArray(reqOrigin) ? reqOrigin[0] : reqOrigin;
-  if (origin === 'null') return 'null'; // file:// 本地工具
+  if (origin === 'null') return null; // file:// / sandbox iframe：不反射，防止读取管理 API
   try {
     const u = new URL(origin);
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;

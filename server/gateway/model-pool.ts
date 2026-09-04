@@ -226,8 +226,8 @@ export class ModelPool {
     return cands;
   }
 
-  /** 精确选择（立即模式不等待）；支持粘性会话 */
-  async selectExact(model: string, exclude: number[], immediate: boolean, clientKey?: string): Promise<Selection> {
+  /** 精确选择（立即模式不等待）；支持粘性会话；signal 用于客户端断开时提前终止等待 */
+  async selectExact(model: string, exclude: number[], immediate: boolean, clientKey?: string, signal?: AbortSignal): Promise<Selection> {
     const excludeSet = new Set(exclude);
     const key = this.stickyKey(clientKey);
     if (key) {
@@ -243,7 +243,7 @@ export class ModelPool {
         }
         if (!immediate) {
           try {
-            const waited = await this.waitAcquire([cand]);
+            const waited = await this.waitAcquire([cand], undefined, signal);
             entry.expiresAt = Date.now() + this.stickyTtlMs;
             return waited;
           } catch {
@@ -262,13 +262,13 @@ export class ModelPool {
       return got;
     }
     if (immediate) throw new PoolError('all channels are busy', 'BUSY');
-    const waited = await this.waitAcquire(cands);
+    const waited = await this.waitAcquire(cands, undefined, signal);
     if (key) this.setSticky(key, waited.channel.provider.id, waited.realModel);
     return waited;
   }
 
-  /** 梯队选择（降级/熔断切换）；支持粘性会话 */
-  async selectTier(tier: CapabilityTier, exclude: number[], immediate: boolean, clientKey?: string): Promise<Selection> {
+  /** 梯队选择（降级/熔断切换）；支持粘性会话；signal 用于客户端断开时提前终止等待 */
+  async selectTier(tier: CapabilityTier, exclude: number[], immediate: boolean, clientKey?: string, signal?: AbortSignal): Promise<Selection> {
     const excludeSet = new Set(exclude);
     const key = this.stickyKey(clientKey);
     if (key) {
@@ -283,7 +283,7 @@ export class ModelPool {
         }
         if (!immediate) {
           try {
-            const waited = await this.waitAcquire([cand], tier);
+            const waited = await this.waitAcquire([cand], tier, signal);
             entry.expiresAt = Date.now() + this.stickyTtlMs;
             return waited;
           } catch {
@@ -304,7 +304,7 @@ export class ModelPool {
       return got;
     }
     if (immediate) throw new PoolError('all channels are busy', 'BUSY');
-    const waited = await this.waitAcquire(cands, tier);
+    const waited = await this.waitAcquire(cands, tier, signal);
     if (key) this.setSticky(key, waited.channel.provider.id, waited.realModel);
     return waited;
   }
@@ -372,10 +372,18 @@ export class ModelPool {
     return fallback;
   }
 
-  private waitAcquire(cands: Candidate[], tier?: CapabilityTier): Promise<Selection> {
+  private waitAcquire(cands: Candidate[], tier?: CapabilityTier, signal?: AbortSignal): Promise<Selection> {
+    // 进入时 signal 已 aborted（客户端已断开 / server 已 shutdown）→ 立即失败，不再轮询
+    if (signal?.aborted) return Promise.reject(new PoolError('wait aborted', 'BUSY'));
     const deadline = Date.now() + 30_000;
     return new Promise((resolve, reject) => {
       const timer = setInterval(() => {
+        // 等待期间客户端断开/服务关闭 → 提前终止，避免空等到 30s 上限
+        if (signal?.aborted) {
+          clearInterval(timer);
+          reject(new PoolError('wait aborted', 'BUSY'));
+          return;
+        }
         const got = this.acquire(cands, tier);
         if (got) {
           clearInterval(timer);

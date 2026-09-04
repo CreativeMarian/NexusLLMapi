@@ -11,16 +11,17 @@ function isWorkerMode(): boolean {
 }
 
 async function detectExistingInstance(port: number): Promise<boolean> {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 1500);
   try {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 1500);
     const resp = await fetch(`http://127.0.0.1:${port}/__nexus/status`, { signal: ctrl.signal });
-    clearTimeout(t);
     if (!resp.ok) return false;
     const body = (await resp.json()) as { app?: string };
     return body.app === 'NexusLLMapi';
   } catch {
     return false;
+  } finally {
+    clearTimeout(t);
   }
 }
 

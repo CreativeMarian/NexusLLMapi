@@ -158,8 +158,11 @@ export class Supervisor {
 
       child.on('exit', () => {
         const uptime = Date.now() - this.workerStartTime;
-        if (uptime >= this.stableUptimeMs()) this.crashTimes = [];
-        else {
+        if (uptime >= this.stableUptimeMs()) {
+          // 稳定运行后崩溃计数与重启次数都归零：避免一次历史故障让后续 backoff 永远顶格
+          this.crashTimes = [];
+          this.restartCount = 0;
+        } else {
           this.restartCount++;
           this.crashTimes.push(Date.now());
         }
@@ -267,15 +270,20 @@ export class Supervisor {
     return new Promise((resolve) => {
       if (exited(child)) return resolve(true);
       let done = false;
+      const onExit = () => finish(true);
+      const onClose = () => finish(true);
       const finish = (v: boolean) => {
         if (done) return;
         done = true;
         clearTimeout(t);
+        // 超时路径清理残留监听，避免每次等待泄漏两个 once 监听器
+        child.removeListener('exit', onExit);
+        child.removeListener('close', onClose);
         resolve(v);
       };
       const t = setTimeout(() => finish(false), timeoutMs);
-      child.once('exit', () => finish(true));
-      child.once('close', () => finish(true));
+      child.once('exit', onExit);
+      child.once('close', onClose);
     });
   }
 
@@ -318,11 +326,12 @@ export class Supervisor {
 
   private async interruptibleDelay(ms: number): Promise<boolean> {
     let timer: NodeJS.Timeout | undefined;
+    let check: NodeJS.Timeout | undefined;
     const stopped = new Promise<boolean>((resolve) => {
       timer = setTimeout(() => resolve(false), ms);
     });
     const stopSignal = new Promise<boolean>((resolve) => {
-      const check = setInterval(() => {
+      check = setInterval(() => {
         if (this.stopping) {
           clearInterval(check);
           resolve(true);
@@ -330,9 +339,13 @@ export class Supervisor {
       }, 200);
       check.unref?.();
     });
-    const result = await Promise.race([stopped, stopSignal]);
-    if (timer) clearTimeout(timer);
-    return result;
+    try {
+      return await Promise.race([stopped, stopSignal]);
+    } finally {
+      // 正常到期路径也必须清理轮询 interval，否则长期运行会累积大量空转定时器
+      if (timer) clearTimeout(timer);
+      if (check) clearInterval(check);
+    }
   }
 
   /**

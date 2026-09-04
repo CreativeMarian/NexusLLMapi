@@ -28,9 +28,11 @@ export function registerModelRoutes(app: FastifyInstance, ctx: RuntimeContext) {
   });
 
   app.post('/api/models/batch-toggle', async (req, reply) => {
-    const body = (req.body ?? {}) as { ids?: number[]; enabled?: boolean };
+    const body = (req.body ?? {}) as { ids?: unknown[]; enabled?: unknown };
     if (!Array.isArray(body.ids)) return reply.code(400).send({ error: 'ids 必须为数组' });
-    repo.batchToggle(body.ids.map(Number), Boolean(body.enabled));
+    // 布尔严格解析（避免 "false" 字符串被 Boolean() 误判为 true）
+    const enabled = body.enabled === true || body.enabled === 'true';
+    repo.batchToggle(body.ids.map(Number), enabled);
     ctx.requestRuntimeReload();
     return { message: 'ok' };
   });
@@ -102,10 +104,17 @@ export function registerModelRoutes(app: FastifyInstance, ctx: RuntimeContext) {
 
   app.post('/api/models/:id/toggle', async (req) => {
     const id = parseId((req.params as { id: string }).id);
-    const enabled = Boolean((req.body as { enabled?: boolean })?.enabled);
+    const current = repo.get(id);
+    // 布尔严格解析：空 body 翻转当前状态；表单编码的 "true"/"false" 字符串也能正确识别
+    const raw = (req.body as { enabled?: unknown } | undefined)?.enabled;
+    let enabled: boolean;
+    if (typeof raw === 'boolean') enabled = raw;
+    else if (raw === 'true' || raw === '1') enabled = true;
+    else if (raw === 'false' || raw === '0') enabled = false;
+    else enabled = current ? !current.enabled : true; // 无 body 或无法识别：视为翻转
     repo.toggle(id, enabled);
     ctx.requestRuntimeReload();
-    return { message: 'ok' };
+    return { message: 'ok', enabled };
   });
 
   app.post('/api/models/:id/test', async (req, reply) => {

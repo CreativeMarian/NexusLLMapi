@@ -27,6 +27,16 @@ interface WorkerHandles {
 
 /** 启动 Worker（真正绑定 8787 的进程） */
 export async function startWorker(): Promise<WorkerHandles> {
+  // 0. 启动窗口期的孤儿检测：若 Supervisor 在 listen 之前被强杀，本进程不能残留占住端口
+  if (process.env.NEXUS_WORKER === '1' && typeof process.send === 'function') {
+    process.on('disconnect', () => {
+      if (!shutdownStarted) {
+        logger.warn('启动期间与 Supervisor 的 IPC 连接断开，判定为孤儿进程，立即退出');
+        process.exit(EXIT.ORPHAN);
+      }
+    });
+  }
+
   const config = new ConfigManager(resolveProjectRoot());
   logger.init(config.baseDir, 'info');
   logger.info('Worker 启动中', { pid: process.pid, port: config.getSnapshot().port });

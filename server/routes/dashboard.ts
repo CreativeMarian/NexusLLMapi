@@ -53,7 +53,10 @@ export function registerDashboardRoutes(app: FastifyInstance, ctx: RuntimeContex
     return { days, trend: logs.trend(days) };
   });
 
-  app.get('/api/trend/channels', async () => ({ channels: logs.channelStats(), total: logs.channelStats().length }));
+  app.get('/api/trend/channels', async () => {
+    const stats = logs.channelStats();
+    return { channels: stats, total: stats.length };
+  });
 
   app.get('/api/trend/models', async (req) => {
     let limit = Number((req.query as { limit?: string }).limit ?? 10);

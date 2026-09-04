@@ -1,37 +1,18 @@
 # NexusLLMapi
 
-本地大模型 API 网关：**统一 OpenAI / Anthropic / Responses 三种协议**，多供应商智能路由、自动故障转移、渠道级重试与熔断、SSE 流式、内置 Supervisor 自愈。纯 Node.js + TypeScript 实现，无任何 EXE / 外部守护进程依赖，一条命令即可部署。
+**Design Intelligence Gateway** —— 本地 AI 模型中转网关
 
-![Node](https://img.shields.io/badge/Node.js-22%2B-339933?logo=nodedotjs&logoColor=white)
-![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white)
-![Fastify](https://img.shields.io/badge/Fastify-4-000000?logo=fastify&logoColor=white)
-![Vue](https://img.shields.io/badge/Vue-3-4FC08D?logo=vuedotjs&logoColor=white)
-![SQLite](https://img.shields.io/badge/SQLite-better--sqlite3-003B57?logo=sqlite&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-122%20passed-2ea44f)
+聚合多供应商渠道，对外暴露统一的 **OpenAI / Anthropic / Responses** 三种协议，内置 **Supervisor + Worker 进程自愈**，并附带完整的 Web 管理面板。开箱即用，`npm start` 一条命令启动。
 
----
-
-## 目录
-
-- [界面预览](#界面预览)
-- [特性](#特性)
-- [快速开始](#快速开始)
-- [使用](#使用)
-- [API 参考](#api-参考)
-- [配置](#配置)
-- [项目结构](#项目结构)
-- [测试](#测试)
-- [常用命令](#常用命令)
-- [技术栈](#技术栈)
-- [许可](#许可)
+> 仅监听 `127.0.0.1`，本地 API 不加鉴权，适合个人 / 家庭环境集中管理多个模型渠道（API Key、限流、重试、熔断、日志都在本地）。
 
 ---
 
 ## 界面预览
 
-> 以下为管理面板实际运行截图（默认深色主题 / 可切换浅色）。
+> 以下为管理面板实际运行截图（默认深色光感主题，可切换浅色）。
 
-| 仪表盘 | 渠道管理 |
+| 实时仪表盘 | 渠道管理 |
 |---|---|
 | ![仪表盘](docs/screenshots/dashboard.png) | ![渠道管理](docs/screenshots/channels.png) |
 
@@ -39,38 +20,82 @@
 |---|---|
 | ![模型库](docs/screenshots/models.png) | ![请求日志](docs/screenshots/logs.png) |
 
+| 代理设置 | MCP 服务器 |
+|---|---|
+| ![代理设置](docs/screenshots/settings.png) | ![MCP 服务器](docs/screenshots/mcp.png) |
+
+| 提示词 |
+|---|
+| ![提示词](docs/screenshots/prompts.png) |
+
 ---
 
 ## 特性
 
 **协议与接入**
 
-- 统一对外暴露 **OpenAI（`/v1/chat/completions`）、Anthropic（`/v1/messages`）、Responses（`/v1/responses`）** 三种协议，内部自动做协议转换
+- 统一对外暴露 **OpenAI（`/v1/chat/completions`）**、**Anthropic（`/v1/messages`）**、**Responses（`/v1/responses`）** 三种协议，内部自动做协议转换
 - 兼容 `Embeddings`、`/v1/models` 模型列表
 - 支持 `GET/POST /p/:channel_id/*` 按指定渠道透传
-- 原生 SSE 流式输出，支持 Claude Code / 各类工具调用完整往返（`tool_use` / `tool_result` / `input_json_delta` 等）
+- 原生 SSE 流式输出，支持 Claude Code / 各类工具调用完整往返（`tool_use` / `tool_result` / `input_json_delta` / 多轮连续工具循环）
+- 图片 / 视频生成端点（OpenAI 兼容，`/v1/images/generations`、`/v1/video/generations`）
 
 **路由与稳定性**
 
 - **多供应商智能路由**：精确模型 → 别名 → 模型梯队 → 降级切换；连续失败自动熔断冷却
 - **粘性会话**：同一客户端 30 分钟固定同一渠道，渠道失效自动重路由
-- **渠道级重试**：`retry_count`（0–10）覆盖全局 `default_retry`；尊重上游 `Retry-After`
-- **渠道健康检查**：后台定时 + 手动触发，仅将真实上游故障计入熔断统计（用户取消、限流、并发满不计入）
+- **渠道级重试**：`retry_count`（-1 继承全局 / 0 不重试 / 1–10 覆盖全局）优先于 `default_retry`；尊重上游 `Retry-After`；401/403/404 不重试，429/5xx 按规则重试
+- **渠道健康检查**：后台定时 + 手动触发，仅将真实上游故障计入熔断统计（用户取消、限流、并发满、Supervisor 停机不计入）
 - **Supervisor 自愈**：Worker 崩溃自动重启、心跳超时 / HTTP 探活失败强制重启、crash-loop 保护退避、慢启动宽限、优雅退出释放端口
 
 **资源管理**
 
 - 客户端断开即 **Abort 上游真实 HTTP 请求**（非仅释放本地槽位）
 - 流式空闲超时（`idle_timeout_ms`），上游卡住自动中断并补发 error SSE
-- SSE 背压处理：上游高速写入时暂停读取，`drain` 后恢复，防止无限内存增长
+- SSE 背压处理：上游高速写入时暂停读取，`drain` 后恢复，防止无限内存增长；不保存完整流式响应体，日志仅记录 token/耗时/状态摘要
 - `/health/deep` 实时暴露 `active_requests` / `active_streams`
+
+**管理面板**
+
+- 页面：仪表盘、渠道管理、模型库、代理设置、请求日志、**MCP 服务器**、**提示词**
+- 模型库：**13 种分类**、**8 种模态**（文本/图像/视频/嵌入/重排/语音识别/语音合成）筛选，跨页「全部启动」/「一键检测连接」/「批量启停删除」，模型连接速度检测，客户端配置一键复制
+- 首次启动且无渠道时自动弹出**聚焦点击新手向导**（跨页面高亮引导完成添加渠道 / 同步模型 / 接入客户端）
+- 前端风格：深色光感 + 粒子背景 + 毛玻璃 + 鼠标点击特效，多页面响应式
 
 **运维**
 
-- Web 管理面板：仪表盘、渠道管理、模型库、代理设置、请求日志；首次启动且无渠道时自动弹出**聚焦点击新手向导**（跨页面高亮引导完成添加渠道 / 同步模型 / 接入客户端）
 - 请求统计、Token 用量、渠道状态、日志检索（日志自动脱敏，不保存流式响应体）
 - SOCKS5 代理支持
+- SQLite WAL 一致性备份（官方 backup API），最多保留 5 份，备份后 `quick_check`
 - 仅监听 `127.0.0.1`，本地 API 不加鉴权
+
+---
+
+## 架构
+
+```
+┌────────────────────────────────────────────────────────────┐
+│                       Supervisor (main.ts)                  │
+│   fork Worker → 心跳/HTTP 探活 → 超时强制重启 → 孤儿回收     │
+└──────────────────────────────┬─────────────────────────────┘
+                               │ IPC (heartbeat / shutdown)
+                               ▼
+┌────────────────────────────────────────────────────────────┐
+│                  Worker (worker.ts) 127.0.0.1:8787         │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  │
+│  │  Fastify API │  │  Gateway     │  │  Model Pool      │  │
+│  │  /v1 /api    │  │  路由/重试    │  │  梯队/熔断/粘性   │  │
+│  │  /health     │  │  协议转换    │  │                  │  │
+│  └──────────────┘  └──────────────┘  └──────────────────┘  │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  │
+│  │  Transport   │  │  Health      │  │  SQLite (WAL)    │  │
+│  │  Abort/背压   │  │  渠道检查/自检│  │  渠道/模型/日志  │  │
+│  └──────────────┘  └──────────────┘  └──────────────────┘  │
+└────────────────────────────────────────────────────────────┘
+```
+
+- **单进程自愈，无外部依赖**：不依赖 PM2 / NSSM / Windows Service / 心跳脚本，Worker 真卡死（不响应心跳、不响应 IPC、不响应 SIGTERM）时 Supervisor 按「IPC → SIGTERM → SIGKILL」逐级强制回收并拉起新 Worker
+- **前端**：Vue 3 + Vite 构建产物由 Worker 同端口托管，SPA 路由回退到 `index.html`
 
 ---
 
@@ -99,7 +124,7 @@ npm start
 - 管理面板：**http://127.0.0.1:8787**
 - API 端点：**http://127.0.0.1:8787/v1**
 
-> `npm start` 的 `prestart` 钩子（`scripts/ensure-build.cjs`）会自动编译缺失/过期的 `dist-server` 与 `web/dist`，无需手动先执行 build。
+> `npm start` 的 `prestart` 钩子（`scripts/ensure-build.cjs`）会自动编译缺失 / 过期的 `dist-server` 与 `web/dist`，无需手动先执行 build。
 >
 > 首次启动会自动生成 `data/config.json`（内置默认值）与空的 `data/store.db`（SQLite），**不需要手动创建任何配置文件**。
 
@@ -122,7 +147,7 @@ API（8787，tsx watch 热重载）+ Vite 前端（5173，HMR）并行启动。
 打开管理面板 → **渠道管理** → 添加渠道，填写：
 
 - 名称（如 `openai-main`）
-- Provider（`openai` / `ollama` / `gemini` / `azure` / `openrouter` / `cloudflare` 等）
+- Provider（`openai` / `ollama` / `gemini` / `azure` / `openrouter` / `modelscope` / `nvidia` / `custom` 等）
 - Base URL
 - API Key
 
@@ -171,6 +196,24 @@ export ANTHROPIC_AUTH_TOKEN=sk-nexus
 claude
 ```
 
+**Responses API（含 tools）**
+
+```bash
+curl http://127.0.0.1:8787/v1/responses \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-nexus" \
+  -d '{"model": "gpt-4o", "input": "What is 2+2?", "tools": [{"type": "function", "name": "calc", "description": "计算", "parameters": {"type": "object", "properties": {}}}]}'
+```
+
+**图片 / 视频生成**
+
+```bash
+curl http://127.0.0.1:8787/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-nexus" \
+  -d '{"model": "图像模型ID", "prompt": "a cat"}'
+```
+
 ---
 
 ## API 参考
@@ -178,15 +221,18 @@ claude
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | POST | `/v1/chat/completions` | OpenAI 兼容对话 / 流式 |
-| POST | `/v1/messages` | Anthropic 协议（自动转换） |
-| POST | `/v1/responses` | OpenAI Responses 协议（含 tools 支持） |
+| POST | `/v1/messages` | Anthropic 协议（自动转换，含工具调用） |
+| POST | `/v1/responses` | OpenAI Responses 协议（含 tools / function_call / stream） |
+| POST | `/v1/images/generations` | 图片生成（OpenAI 兼容，需启用图像模型） |
+| POST | `/v1/video/generations` | 视频生成（需启用视频模型） |
 | POST | `/v1/embeddings` | 向量生成 |
 | GET | `/v1/models` | 可用模型列表 |
 | GET/POST | `/p/:channelId/*` | 按渠道透传（channelId 支持 id 或名称） |
 | GET | `/health/live` | 存活探针 |
 | GET | `/health/ready` | 就绪探针 |
 | GET | `/health/deep` | 深度自检（active_requests / active_streams 等） |
-| GET/POST | `/api/channels` 等 | 管理 API（面板后端） |
+| GET/POST | `/api/channels` 等 | 管理 API（面板后端，含同步/测试/健康检查） |
+| GET/POST | `/api/mcp`、`/api/prompts` | MCP 服务器与提示词管理 |
 
 ---
 
@@ -220,14 +266,18 @@ NexusLLMapi/
 │   ├── worker.ts           # Worker：初始化模块、监听端口、心跳 IPC
 │   ├── supervisor/         # 自愈监控（心跳/探活/重启/crash-loop 保护）
 │   ├── gateway/            # 网关（模型路由池、协议转换、重试、流式、背压）
-│   ├── providers/          # 供应商适配与 HTTP Transport
+│   ├── providers/          # 供应商适配、模型分类打标与 HTTP Transport
 │   ├── health/             # 活跃请求注册、渠道健康检查、自检
 │   ├── routes/             # Fastify 路由（网关 / 管理 / 健康）
 │   ├── config/             # 配置管理（data/config.json，内置默认值）
 │   └── db/                 # SQLite 访问层（better-sqlite3，WAL）
 ├── web/                    # 前端（Vue 3 + Vite + Tailwind）
+│   └── src/
+│       ├── views/          # 仪表盘/渠道/模型库/设置/日志/MCP/提示词
+│       └── components/     # UI 组件（毛玻璃卡片、粒子背景、新手向导等）
 ├── tests/                  # Vitest 测试套件
 ├── scripts/                # ensure-build / 打包等脚本
+├── docs/screenshots/       # 界面预览截图
 ├── data/                   # 运行时数据（不入库）
 ├── package.json
 └── README.md
@@ -238,11 +288,11 @@ NexusLLMapi/
 ## 测试
 
 ```bash
-npm test          # Vitest 全量测试（122 用例，10 个测试文件）
+npm test          # Vitest 全量测试（137 用例，12 个测试文件）
 npm run typecheck # TypeScript 全量类型检查
 ```
 
-覆盖范围：数据库兼容、Provider 头构造、路由与 SPA 回退、重试三态语义、SSE 流式与背压、Supervisor 自愈（正常退出 / 卡死强杀 / 慢启动 / 孤儿回收）、ensure-build 增量构建等。
+覆盖范围：数据库兼容与 SQLite WAL 备份一致性、Provider 头构造、路由与 SPA 回退、重试三态语义（-1/0/1–10 与状态码规则）、SSE 流式与背压、客户端断开真实 Abort 上游、Supervisor 自愈（正常退出 / 真卡死强杀 / 慢启动 / 孤儿回收）、ensure-build 增量构建、Anthropic / Responses 工具调用往返、资源释放路径（无 listener / timer / AbortSignal 泄漏）等。
 
 ---
 

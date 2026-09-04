@@ -3,7 +3,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   LayoutDashboard, Plug, Cpu, Settings, ScrollText,
-  Menu, X, Sun, Moon, Terminal, Activity
+  Menu, X, Sun, Moon, Terminal, Activity, Zap, Boxes, FileText
 } from 'lucide-vue-next'
 import { useTheme } from '@/composables/useTheme'
 import ParticleBackground from '@/components/ParticleBackground.vue'
@@ -21,7 +21,9 @@ const navItems = [
   { name: '渠道管理', path: '/channels', icon: Plug },
   { name: '模型库', path: '/models', icon: Cpu },
   { name: '代理设置', path: '/settings', icon: Settings },
-  { name: '请求日志', path: '/logs', icon: ScrollText }
+  { name: '请求日志', path: '/logs', icon: ScrollText },
+  { name: 'MCP 服务器', path: '/mcp', icon: Boxes },
+  { name: '提示词', path: '/prompts', icon: FileText }
 ]
 
 const activeItem = computed(() =>
@@ -51,7 +53,8 @@ onUnmounted(() => {
 })
 async function checkHealth() {
   try {
-    const res = await fetch('/api/channels', { signal: AbortSignal.timeout(3000) })
+    // 用轻量的存活探针而非全量渠道列表（/api/channels 含密钥，且 >3s 会被误判 DOWN）
+    const res = await fetch('/health/live', { signal: AbortSignal.timeout(3000) })
     serviceRunning.value = res.ok
   } catch {
     serviceRunning.value = false

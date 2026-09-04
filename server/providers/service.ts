@@ -7,6 +7,7 @@ import {
   parseModelList,
   resolveBaseURL,
   transformRequestBody,
+  upstreamEndpoint,
   type FetchedModel,
 } from './registry.js';
 import { classifyModel, isDefaultEnabled } from './classify.js';
@@ -48,9 +49,12 @@ export class ProviderService {
     const base = resolveBaseURL(ch.base_url, extra);
     if (!base) throw new Error('渠道 BaseURL 为空');
     const headers = buildHeaders(ch.provider_type, ch.api_key, extra);
+    // Azure 的模型列表是 deployments 端点；其余厂商用 {base}/models
+    const listUrl =
+      ch.provider_type === 'azure' ? upstreamEndpoint(base, '/deployments', ch.provider_type, extra) : modelsEndpoint(base);
     const resp = await this.transport.request({
       method: 'GET',
-      url: modelsEndpoint(base),
+      url: listUrl,
       headers,
       timeoutMs: this.timeout(),
       socksProxy: this.proxy(),
@@ -169,7 +173,7 @@ export class ProviderService {
     try {
       const resp = await this.transport.request({
         method: 'POST',
-        url: `${base}/chat/completions`,
+        url: upstreamEndpoint(base, '/chat/completions', ch.provider_type, extra),
         headers,
         body,
         timeoutMs: this.timeout(),

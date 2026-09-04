@@ -1,6 +1,5 @@
-import { createWriteStream, mkdirSync, statSync, renameSync, existsSync } from 'node:fs';
+import { mkdirSync, statSync, renameSync, existsSync, appendFileSync, writeFileSync, copyFileSync, truncateSync } from 'node:fs';
 import { join } from 'node:path';
-import type { WriteStream } from 'node:fs';
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
@@ -23,33 +22,44 @@ export function maskSecret(text: string): string {
   return out;
 }
 
+/**
+ * 同步文件日志：
+ * - appendFileSync 逐行追加（本项目文件日志量很小，同步开销可忽略）；
+ *   不持有长打开的句柄 → Supervisor/Worker 两进程共享同一文件时，
+ *   Windows 上 rename 滚动不会因句柄占用失败，进程退出前日志也不会丢失。
+ * - 滚动用「复制 + 截断」而非 rename：保证多进程同时打开写时也能滚动成功。
+ */
 class Logger {
-  private stream: WriteStream | null = null;
   private logFile = '';
   private minLevel: LogLevel = 'info';
+  private bytes = 0;
 
   init(baseDir: string, level: LogLevel = 'info') {
     this.minLevel = level;
     const dir = join(baseDir, 'data', 'logs');
     mkdirSync(dir, { recursive: true });
     this.logFile = join(dir, 'server.log');
-    this.rotateIfNeeded();
-    this.stream = createWriteStream(this.logFile, { flags: 'a' });
+    this.bytes = this.rotateIfNeeded();
   }
 
-  private rotateIfNeeded() {
+  /** 超过大小上限时滚动；返回滚动后的当前文件大小 */
+  private rotateIfNeeded(): number {
     try {
-      if (!existsSync(this.logFile)) return;
-      const { size } = statSync(this.logFile);
-      if (size < MAX_LOG_BYTES) return;
+      if (!this.logFile) return 0;
+      const size = existsSync(this.logFile) ? statSync(this.logFile).size : 0;
+      if (size < MAX_LOG_BYTES) return size;
       for (let i = KEEP_LOG_FILES - 1; i >= 1; i--) {
         const from = `${this.logFile}.${i}`;
         const to = `${this.logFile}.${i + 1}`;
         if (existsSync(from)) renameSync(from, to);
       }
-      renameSync(this.logFile, `${this.logFile}.1`);
+      // 复制 + 截断：当前文件可能同时被 Supervisor/Worker 打开写入，rename 会失败
+      copyFileSync(this.logFile, `${this.logFile}.1`);
+      truncateSync(this.logFile, 0);
+      return 0;
     } catch {
-      // 滚动失败不影响主流程
+      // 滚动失败不影响主流程；返回未知大小时按已达上限处理，下次写日志再试
+      return MAX_LOG_BYTES;
     }
   }
 
@@ -70,9 +80,13 @@ class Logger {
     }
     const consoleFn = level === 'error' ? console.error : level === 'warn' ? console.warn : console.log;
     consoleFn(line);
-    if (this.stream) {
-      this.rotateIfNeeded();
-      this.stream.write(line + '\n');
+    if (!this.logFile) return;
+    try {
+      if (this.bytes >= MAX_LOG_BYTES) this.bytes = this.rotateIfNeeded();
+      appendFileSync(this.logFile, line + '\n', 'utf-8');
+      this.bytes += Buffer.byteLength(line + '\n');
+    } catch {
+      /* 文件写入失败不影响主流程 */
     }
   }
 
@@ -81,21 +95,21 @@ class Logger {
   warn(msg: string, meta?: Record<string, unknown>) { this.write('warn', msg, meta); }
   error(msg: string, meta?: Record<string, unknown>) { this.write('error', msg, meta); }
 
+  /** 崩溃现场：进程即将退出，必须用同步写保证落盘 */
   crash(baseDir: string, content: string) {
     try {
       const dir = join(baseDir, 'data', 'logs');
       mkdirSync(dir, { recursive: true });
       const name = join(dir, `crash-${new Date().toISOString().replace(/[:.]/g, '-')}.log`);
-      const s = createWriteStream(name);
-      s.end(maskSecret(content));
+      writeFileSync(name, maskSecret(content), 'utf-8');
     } catch {
       // ignore
     }
   }
 
+  /** 兼容保留：写入已改为同步，无需冲洗 */
   close() {
-    this.stream?.end();
-    this.stream = null;
+    /* no-op */
   }
 }
 

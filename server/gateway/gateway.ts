@@ -1,9 +1,9 @@
-import type { FastifyReply, FastifyRequest } from 'fastify';
+﻿import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { RuntimeContext } from '../context.js';
 import { ModelPool, PoolError, type Selection } from './model-pool.js';
 import { RateLimiter } from './token-bucket.js';
 import { Transport } from '../providers/transport.js';
-import { buildHeaders, getSpec, resolveBaseURL, parseExtra } from '../providers/registry.js';
+import { buildHeaders, getSpec, resolveBaseURL, parseExtra, upstreamEndpoint } from '../providers/registry.js';
 import { inferTier } from '../providers/templates.js';
 import {
   buildUpstreamBody,
@@ -16,6 +16,7 @@ import {
   AnthropicSseConverter,
   ResponsesSseConverter,
   anthropicToOpenAI,
+  openaiErrorToAnthropic,
   openaiToAnthropic,
   openaiToResponses,
   responsesToOpenAI,
@@ -163,17 +164,17 @@ export class Gateway {
       let sel: Selection | null = null;
       try {
         if (attempt === 0) {
-          sel = await this.pool.selectExact(modelName, [], false, clientKey);
+          sel = await this.pool.selectExact(modelName, [], false, clientKey, controller.signal);
         } else {
           // 重试：优先同渠道（瞬时可恢复），其次借评分切到更健康渠道；
           // 熔断/冷却中的渠道被 isAvailable 自动排除，无需手动排除 tried；
           try {
-            sel = await this.pool.selectExact(modelName, [], true, clientKey);
+            sel = await this.pool.selectExact(modelName, [], true, clientKey, controller.signal);
           } catch {
             let picked: Selection | null = null;
             for (const t of ModelPool.tierChain(originalTier)) {
               try {
-                picked = await this.pool.selectTier(t, [], false, clientKey);
+                picked = await this.pool.selectTier(t, [], false, clientKey, controller.signal);
                 break;
               } catch {
                 /* try next tier */
@@ -184,6 +185,7 @@ export class Gateway {
           }
         }
       } catch (err) {
+        if (controller.signal.aborted) break; // 客户端断开/服务关闭：不再等待也不重试
         lastErr = (err as Error).message;
         lastStatus = err instanceof PoolError && err.code === 'NO_MODEL' ? 404 : 503;
         // NO_MODEL：模型不存在（或已无可路由渠道）是确定性结果，不重试也不应降级到其它模型
@@ -230,7 +232,7 @@ export class Gateway {
         isStream,
         modelPrefix: spec.modelPrefix,
       });
-      const url = `${base.replace(/\/+$/, '')}/chat/completions`;
+      const url = upstreamEndpoint(base, '/chat/completions', ch.provider_type, extra);
       const upstreamStart = Date.now();
 
       try {
@@ -262,12 +264,13 @@ export class Gateway {
           lastErr = streamResult.errorBody ? `upstream ${streamResult.status}: ${streamResult.errorBody.slice(0, 300)}` : (reason === 'client' ? 'client aborted' : 'stream failed');
           if (streamResult.errorBody) lastRawError = streamResult.errorBody;
           this.recordLog(requestId, modelName, ch.id, ch.name, status, streamResult.usage, dur, lastErr);
-          cleanupRegistry();
+          // 可重试（未写头）时保留活跃注册与 AbortController 继续下一轮尝试
           if (attempt < maxRetry && !reply.raw.headersSent && (streamResult.status === 0 || RETRYABLE.has(status))) {
             const retryAfterMs = streamResult.retryAfter ?? null;
             await delay(retryAfterMs ?? 500 * (attempt + 1));
             continue;
           }
+          cleanupRegistry();
           break;
         }
 
@@ -298,6 +301,7 @@ export class Gateway {
         reply.header('X-Request-ID', requestId);
         if (protocol === 'anthropic') {
           if (resp.status >= 200 && resp.status < 300) outBody = openaiToAnthropic(resp.text, modelName);
+          else outBody = openaiErrorToAnthropic(resp.text, resp.status);
           reply.header('Content-Type', 'application/json');
           reply.code(resp.status).send(outBody);
         } else if (protocol === 'responses') {
@@ -322,6 +326,12 @@ export class Gateway {
         cleanupRegistry();
         return;
       } catch (err) {
+        if (controller.signal.aborted) {
+          // 客户端断开/服务关闭：非渠道故障，中性释放、不再重试
+          this.pool.releaseNeutral(ch.id);
+          logger.warn('上游请求因客户端断开/服务关闭中断', { attempt, error: (err as Error).message, channel: ch.name });
+          break;
+        }
         releaseOnce(false);
         lastErr = (err as Error).message;
         lastStatus = 502;
@@ -335,7 +345,13 @@ export class Gateway {
     cleanupRegistry();
     if (!reply.raw.headersSent) {
       this.recordLog(requestId, modelName, 0, '', lastStatus, zeroUsage(), Date.now() - startedAt, lastErr);
-      if (lastRawError) {
+      if (protocol === 'anthropic') {
+        // Anthropic 客户端依赖 {type:'error'} 结构解析失败信息
+        reply
+          .code(lastStatus)
+          .header('Content-Type', 'application/json')
+          .send(openaiErrorToAnthropic(lastRawError || lastErr || 'all attempts failed', lastStatus));
+      } else if (lastRawError) {
         // 透传上游原始错误体（如 OpenAI 401/404 的 error JSON），保留其状态码
         reply.code(lastStatus).header('Content-Type', 'application/json').send(lastRawError);
       } else {
@@ -449,6 +465,14 @@ export class Gateway {
       return raw.write(text);
     };
 
+    /** 从 abort 原因推断失败归属：idle=空闲超时、other=服务关闭、client=客户端断开（不计渠道熔断） */
+    const abortReason = (): StreamResult['reason'] => {
+      const why = (controller.signal.reason as Error | undefined)?.message ?? '';
+      if (why.includes('idle timeout')) return 'idle';
+      if (why.includes('server shutdown')) return 'other';
+      return 'client';
+    };
+
     try {
       armIdle();
       for await (const chunk of upstream) {
@@ -475,8 +499,9 @@ export class Gateway {
             usageTracker.feed(line.slice(5).trim());
           }
         } else {
-          // 按行解析 OpenAI SSE，逐 data 转换
+          // 按行解析 OpenAI SSE，逐 data 转换；设上限防止异常上游一直不发换行造成无限增长（与 openai 分支一致）
           lineBuf += text;
+          if (lineBuf.length > 65536) lineBuf = lineBuf.slice(lineBuf.length - 65536);
           let nl: number;
           while ((nl = lineBuf.indexOf('\n')) >= 0) {
             const line = lineBuf.slice(0, nl).trim();
@@ -490,7 +515,7 @@ export class Gateway {
           }
         }
         // 背压：客户端写入缓冲区已满 → 暂停读上游，等待 drain 后再继续；
-        // 竞速 close/error，避免客户端半途关闭时 drain 永远不触发而挂死；
+        // 竞速 close/error/abort，避免客户端半途关闭或空闲超时触发时 drain 永远不触发而挂死；
         // 结束后清理所有临时监听，避免遗留 listener
         if (raw.writableNeedDrain) {
           this.backpressure.pauseCount++;
@@ -509,14 +534,20 @@ export class Gateway {
               cleanup();
               reject(e);
             };
+            const onAbort = () => {
+              cleanup();
+              reject(new Error(controller.signal.reason ?? new Error('stream aborted')));
+            };
             const cleanup = () => {
               raw.removeListener('drain', onDrain);
               raw.removeListener('close', onClose);
               raw.removeListener('error', onError);
+              controller.signal.removeEventListener('abort', onAbort);
             };
             raw.once('drain', onDrain);
             raw.once('close', onClose);
             raw.once('error', onError);
+            controller.signal.addEventListener('abort', onAbort, { once: true });
           });
           this.backpressure.resumeCount++;
           upstream.resume();
@@ -530,14 +561,10 @@ export class Gateway {
       }
       if (protocol === 'openai' && !usageTracker.sawDone && !clientAborted) writeOut('data: [DONE]\n\n');
       raw.end();
-      return { ok: !clientAborted, usage: usageTracker.usage };
+      return { ok: !clientAborted, usage: usageTracker.usage, reason: clientAborted ? abortReason() : undefined };
     } catch (err) {
       logger.warn('SSE 管道中断', { error: (err as Error).message, channel: p.channelName });
-      let reason: StreamResult['reason'] = 'upstream';
-      if (controller.signal.aborted) {
-        const why = (controller.signal.reason as Error | undefined)?.message ?? '';
-        reason = why.includes('idle timeout') ? 'idle' : why.includes('server shutdown') ? 'other' : 'client';
-      }
+      const reason: StreamResult['reason'] = controller.signal.aborted ? abortReason() : 'upstream';
       try {
         // 空闲超时：向已写头的客户端补发一条 error SSE 事件，再收尾
         if (controller.signal.aborted && !raw.writableEnded) {
@@ -591,7 +618,7 @@ export class Gateway {
       const extra = parseExtra(ch.extra_config);
       const resp = await this.transport.request({
         method: 'POST',
-        url: `${resolveBaseURL(ch.base_url, extra).replace(/\/+$/, '')}/embeddings`,
+        url: upstreamEndpoint(resolveBaseURL(ch.base_url, extra), '/embeddings', ch.provider_type, extra),
         headers: buildHeaders(ch.provider_type, ch.api_key, extra),
         body: rawBody,
         timeoutMs: this.timeoutMs(),
@@ -599,6 +626,59 @@ export class Gateway {
         signal: clientSignal(req),
       });
       reply.header('Content-Type', 'application/json');
+      reply.code(resp.status).send(Buffer.from(resp.buffer));
+      release(resp.status < 400);
+      this.recordLog(rid, model, ch.id, ch.name, resp.status, zeroUsage(), Date.now() - start, resp.status >= 400 ? resp.text.slice(0, 300) : '');
+    } catch (err) {
+      release(false);
+      writeJson(reply, 502, { error: { message: (err as Error).message } });
+    }
+  }
+
+  // ================= 媒体生成（images / video，非流式透传）=================
+  // 统一处理 OpenAI 风格 /v1/images/generations 与 /v1/video/generations：
+  // 按 model 精确路由到渠道 → 原样转发 {base}/{kind} → 返回上游响应（JSON / 二进制）。
+  // 视频等长任务使用更长超时（至少 10 分钟），避免生成过程中被超时截断。
+  async handleMediaGeneration(req: FastifyRequest, reply: FastifyReply, kind: string) {
+    const rawBody = Buffer.isBuffer(req.body) ? (req.body as Buffer) : JSON.stringify(req.body ?? {});
+    let model = '';
+    try {
+      model = String((JSON.parse(Buffer.isBuffer(req.body) ? req.body.toString() : String(rawBody)) as { model?: string }).model ?? '');
+    } catch {
+      /* ignore */
+    }
+    if (!model) return writeJson(reply, 400, { error: { message: 'model is required' } });
+    const rid = this.requestId(kind.startsWith('images') ? 'img' : 'vid');
+    const start = Date.now();
+
+    let sel: Selection;
+    try {
+      sel = await this.pool.selectExact(model, [], false);
+    } catch (err) {
+      return writeJson(reply, err instanceof PoolError && err.code === 'NO_MODEL' ? 404 : 503, {
+        error: { message: (err as Error).message },
+      });
+    }
+    const ch = sel.channel.provider;
+    let settled = false;
+    const release = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      this.pool.release(ch.id, ok);
+    };
+    try {
+      const extra = parseExtra(ch.extra_config);
+      const timeoutMs = Math.max(this.timeoutMs(), 600_000); // 媒体生成长耗时：至少 10 分钟
+      const resp = await this.transport.request({
+        method: 'POST',
+        url: upstreamEndpoint(resolveBaseURL(ch.base_url, extra), `/${kind}`, ch.provider_type, extra),
+        headers: buildHeaders(ch.provider_type, ch.api_key, extra),
+        body: rawBody,
+        timeoutMs,
+        socksProxy: this.proxy(),
+        signal: clientSignal(req),
+      });
+      reply.header('Content-Type', resp.headers['content-type'] ?? 'application/json');
       reply.code(resp.status).send(Buffer.from(resp.buffer));
       release(resp.status < 400);
       this.recordLog(rid, model, ch.id, ch.name, resp.status, zeroUsage(), Date.now() - start, resp.status >= 400 ? resp.text.slice(0, 300) : '');
@@ -621,12 +701,20 @@ export class Gateway {
     const search = new URLSearchParams(req.query as Record<string, string>).toString();
     const url = `${base}${upstreamPath}${search ? '?' + search : ''}`;
     const method = (req.method ?? 'GET').toUpperCase();
-    const body = method === 'GET' || method === 'HEAD' ? null : JSON.stringify(req.body ?? {});
+    // GET/HEAD 无 body；二进制请求体（multipart/octet-stream 等，由兜底解析器保留为 Buffer）原样透传
+    let body: Buffer | string | null = null;
+    if (method !== 'GET' && method !== 'HEAD') {
+      body = Buffer.isBuffer(req.body) ? (req.body as Buffer) : JSON.stringify(req.body ?? {});
+    }
 
     // 复用 Provider header，并透传客户端的关键请求头（保留 content-type 等）
     const headers = buildHeaders(ch.provider_type, ch.api_key, extra);
-    const clientCT = String(req.headers['content-type'] ?? '').split(';')[0];
-    if (clientCT && clientCT !== 'application/json') headers['Content-Type'] = clientCT;
+    // 非 JSON 请求（multipart/octet-stream 等）透传完整原始 Content-Type（含 boundary），
+    // 保证上游能正确解析 multipart；JSON 请求沿用 buildHeaders 默认值。
+    const clientCT = req.headers['content-type'];
+    if (clientCT !== undefined && String(clientCT).toLowerCase() !== 'application/json') {
+      headers['Content-Type'] = String(clientCT);
+    }
     for (const h of ['accept', 'anthropic-version', 'x-api-key']) {
       const v = req.headers[h];
       if (v !== undefined) headers[toHeaderCase(h)] = String(v);

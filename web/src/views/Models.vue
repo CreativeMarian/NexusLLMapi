@@ -17,7 +17,7 @@ import Checkbox from '@/components/ui/Checkbox.vue'
 import Dialog from '@/components/ui/Dialog.vue'
 import {
   Cpu, Search, Filter, Power, PowerOff, Edit3, X,
-  Image as ImageIcon, Video, FileText, Copy, Check, Link, Key, Settings, Terminal,
+  Image as ImageIcon, Video, Layers, ArrowUpDown, Mic, Volume2, FileText, Copy, Check, Link, Key, Settings, Terminal,
   Zap, Loader2, Trash2, Activity, CheckCircle2, XCircle, AlertTriangle, RefreshCw
 } from 'lucide-vue-next'
 
@@ -38,7 +38,6 @@ const pageSize = ref(48)
 
 // 批量选择
 const selected = ref(new Set())
-const selectAll = ref(false)
 
 // 编辑别名
 const editDialog = ref(false)
@@ -69,7 +68,11 @@ const modalTypeOptions = [
   { value: '', label: '全部模态' },
   { value: 'text', label: '文本' },
   { value: 'image', label: '图像' },
-  { value: 'video', label: '视频' }
+  { value: 'video', label: '视频' },
+  { value: 'embedding', label: '嵌入' },
+  { value: 'rerank', label: '重排' },
+  { value: 'asr', label: '语音识别' },
+  { value: 'tts', label: '语音合成' }
 ]
 
 const enabledOptions = [
@@ -96,12 +99,11 @@ const configChannel = computed(() => {
 })
 const configApiKey = computed(() => configChannel.value?.api_key || '（未设置 API Key，请在渠道管理中配置）')
 
-// 批量检测失败的模型 ID 列表
+// 批量检测失败的模型 ID 列表（跨页汇总：结果自带 DB id，不依赖当前页数据）
 const failedModelIds = computed(() => {
   const ids = []
-  for (const m of models.value) {
-    const r = batchTestResults.value[m.model_id]
-    if (r && r.success === false) ids.push(m.id)
+  for (const r of Object.values(batchTestResults.value)) {
+    if (r && r.success === false && r.id) ids.push(r.id)
   }
   return ids
 })
@@ -131,7 +133,6 @@ function openConfig(m) {
 async function loadData() {
   loading.value = true
   selected.value.clear()
-  selectAll.value = false
   try {
     const params = { page: page.value, page_size: pageSize.value }
     if (keyword.value) params.keyword = keyword.value
@@ -170,15 +171,6 @@ function applyFilters() {
 function toggleSelect(id) {
   if (selected.value.has(id)) selected.value.delete(id)
   else selected.value.add(id)
-  selectAll.value = selected.value.size === models.value.length && models.value.length > 0
-}
-
-function toggleSelectAll() {
-  if (selectAll.value) {
-    models.value.forEach(m => selected.value.add(m.id))
-  } else {
-    selected.value.clear()
-  }
 }
 
 async function onToggle(m) {
@@ -201,10 +193,12 @@ async function onTestSpeed(m) {
     const res = await testModelSpeed(m.id)
     const data = res.data || res
     testResults.value[m.id] = data
-    // 同步到批量检测结果
+    // 同步到批量检测结果（保持「删除失效模型」名单一致）
     batchTestResults.value[m.model_id] = data
   } catch (e) {
-    testResults.value[m.id] = { success: false, error: e.message || '测试失败', duration_ms: 0 }
+    const data = { id: m.id, success: false, error: e.message || '测试失败', duration_ms: 0 }
+    testResults.value[m.id] = data
+    batchTestResults.value[m.model_id] = data
   } finally {
     testingId.value = null
   }
@@ -304,9 +298,14 @@ async function deleteAllModels() {
   }
   deletingAll.value = true
   try {
-    // 先获取所有模型ID
-    const res = await getModels({ page: 1, page_size: 100000 })
-    const allIds = (res.data || []).map(m => m.id)
+    // 后端分页 pageSize 上限 500，必须循环拉取才能拿到全部模型
+    const allIds = []
+    for (let p = 1; ; p++) {
+      const res = await getModels({ page: p, page_size: 500 })
+      const list = res.data || []
+      allIds.push(...list.map(m => m.id))
+      if (allIds.length >= (res.total || 0) || list.length === 0) break
+    }
     if (allIds.length === 0) {
       alert('没有可删除的模型')
       return
@@ -325,6 +324,32 @@ async function deleteAllModels() {
     alert('删除失败: ' + (e.message || '未知错误'))
   } finally {
     deletingAll.value = false
+  }
+}
+
+// 全部启动：启用所有模型配置（跨页循环拉取）
+const enablingAll = ref(false)
+async function enableAllModels() {
+  if (enablingAll.value) return
+  const allIds = []
+  for (let p = 1; ; p++) {
+    const res = await getModels({ page: p, page_size: 500 })
+    const list = res.data || []
+    allIds.push(...list.map(m => m.id))
+    if (allIds.length >= (res.total || 0) || list.length === 0) break
+  }
+  if (allIds.length === 0) { alert('没有可启用的模型'); return }
+  if (!confirm(`将启用全部 ${allIds.length} 个模型，确定继续？`)) return
+  enablingAll.value = true
+  try {
+    await batchToggleModels(allIds, true)
+    selected.value.clear()
+    loadData()
+    alert(`已启用 ${allIds.length} 个模型`)
+  } catch (e) {
+    alert('全部启动失败: ' + (e.message || '未知错误'))
+  } finally {
+    enablingAll.value = false
   }
 }
 
@@ -357,12 +382,20 @@ async function saveAlias() {
 function getModalIcon(type) {
   if (type === 'image') return ImageIcon
   if (type === 'video') return Video
+  if (type === 'embedding') return Layers
+  if (type === 'rerank') return ArrowUpDown
+  if (type === 'asr') return Mic
+  if (type === 'tts') return Volume2
   return FileText
 }
 
 function getModalColor(type) {
   if (type === 'image') return 'text-brand-purple'
   if (type === 'video') return 'text-brand-orange'
+  if (type === 'embedding') return 'text-brand-green'
+  if (type === 'rerank') return 'text-amber-400'
+  if (type === 'asr') return 'text-cyan-400'
+  if (type === 'tts') return 'text-pink-400'
   return 'text-brand-blue'
 }
 
@@ -415,6 +448,15 @@ onMounted(async () => { await loadMeta(); loadData() })
         </p>
       </div>
       <div class="flex shrink-0 items-center gap-2">
+        <Button
+          variant="outline"
+          :disabled="enablingAll || total === 0"
+          @click="enableAllModels"
+        >
+          <Loader2 v-if="enablingAll" class="mr-2 h-4 w-4 animate-spin" />
+          <Power v-else class="mr-2 h-4 w-4" />
+          {{ enablingAll ? '启动中...' : '全部启动' }}
+        </Button>
         <Button data-guide="check-models"
           :disabled="batchTesting"
           @click="onBatchTest"
@@ -437,7 +479,7 @@ onMounted(async () => { await loadMeta(); loadData() })
     </div>
 
     <!-- 筛选栏 -->
-    <Card>
+    <Card className="relative z-30">
       <CardContent class="p-4">
         <div class="flex flex-wrap items-center gap-3">
           <div class="relative flex-1 min-w-[200px]">

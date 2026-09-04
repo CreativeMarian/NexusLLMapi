@@ -50,6 +50,8 @@ export function registerChannelRoutes(app: FastifyInstance, ctx: RuntimeContext)
   app.put('/api/channels/:id', async (req, reply) => {
     const id = parseId((req.params as { id: string }).id);
     const body = (req.body ?? {}) as Record<string, unknown>;
+    // rpm_limit 必须是有限数（NaN/Infinity 直传 SQLite 会绑定失败或写入非法值）
+    const rpmNum = Number(body.rpm_limit);
     const ch = repo.update(id, {
       name: body.name !== undefined ? String(body.name) : undefined,
       provider_type: body.provider_type !== undefined ? String(body.provider_type) : undefined,
@@ -57,7 +59,7 @@ export function registerChannelRoutes(app: FastifyInstance, ctx: RuntimeContext)
       api_key: body.api_key !== undefined ? String(body.api_key) : undefined,
       extra_config: body.extra_config !== undefined ? String(body.extra_config) : undefined,
       enabled: typeof body.enabled === 'boolean' ? body.enabled : undefined,
-      rpm_limit: body.rpm_limit !== undefined ? Number(body.rpm_limit) : undefined,
+      rpm_limit: body.rpm_limit !== undefined ? (Number.isFinite(rpmNum) ? Math.max(0, rpmNum) : undefined) : undefined,
       retry_count: retryInput(body.retry_count),
     });
     if (!ch) return reply.code(404).send({ error: 'channel not found' });
@@ -72,12 +74,20 @@ export function registerChannelRoutes(app: FastifyInstance, ctx: RuntimeContext)
     return { message: 'deleted' };
   });
 
-  app.post('/api/channels/:id/toggle', async (req, reply) => {
+  app.post('/api/channels/:id/toggle', async (req) => {
     const id = parseId((req.params as { id: string }).id);
-    const enabled = Boolean((req.body as { enabled?: boolean })?.enabled);
+    const current = repo.get(id);
+    if (!current) return { message: 'ok', incremental: true };
+    // 布尔严格解析：空 body 翻转当前状态；表单编码的 "true"/"false" 字符串也能正确识别
+    const raw = (req.body as { enabled?: unknown } | undefined)?.enabled;
+    let enabled: boolean;
+    if (typeof raw === 'boolean') enabled = raw;
+    else if (raw === 'true' || raw === '1') enabled = true;
+    else if (raw === 'false' || raw === '0') enabled = false;
+    else enabled = !current.enabled; // 无 body 或无法识别：视为翻转
     repo.toggle(id, enabled);
     ctx.requestRuntimeReload();
-    return { message: 'ok', incremental: true };
+    return { message: 'ok', incremental: true, enabled };
   });
 
   app.post('/api/channels/:id/test', async (req, reply) => {

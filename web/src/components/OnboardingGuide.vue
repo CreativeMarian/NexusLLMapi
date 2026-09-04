@@ -69,6 +69,7 @@ const isIntro = computed(() => currentStep.value.type === 'intro')
 const isOutro = computed(() => currentStep.value.type === 'outro')
 
 let pollTimer = null
+let pollGen = 0 // 轮询代际：快速切换步骤时让旧的轮询链失效
 let resizeHandler = null
 let scrollHandler = null
 
@@ -82,17 +83,23 @@ function markDone() {
 
 async function locateTarget() {
   const step = currentStep.value
+  const gen = ++pollGen
+  if (pollTimer) { clearTimeout(pollTimer); pollTimer = null }
   if (!step.target) {
     highlight.value.show = false
     found.value = false
+    polling.value = false
     return
   }
   // 等待目标元素出现（跨路由渲染后）
+  polling.value = true
   let tries = 0
   const poll = async () => {
+    if (gen !== pollGen) return // 已切换到其它步骤：本次轮询链作废
     tries++
     const el = document.querySelector(step.target)
     if (el) {
+      polling.value = false
       found.value = true
       placeOn(el)
       return
@@ -100,6 +107,7 @@ async function locateTarget() {
     if (tries < 40) { // ~4s
       pollTimer = setTimeout(poll, 100)
     } else {
+      polling.value = false
       found.value = false
       highlight.value.show = false
     }
@@ -196,6 +204,8 @@ watch(() => props.open, (v) => {
     shown.value = false
     lockScroll(false)
     highlight.value.show = false
+    polling.value = false
+    pollGen++
     if (pollTimer) clearTimeout(pollTimer)
   }
 })
@@ -208,6 +218,7 @@ onMounted(() => {
 })
 onUnmounted(() => {
   lockScroll(false)
+  pollGen++
   if (pollTimer) clearTimeout(pollTimer)
   window.removeEventListener('resize', resizeHandler)
   window.removeEventListener('scroll', scrollHandler)
@@ -222,7 +233,8 @@ defineExpose({ hasCompleted })
 
 <template>
   <Teleport to="body">
-    <div v-if="props.open" class="guide-fade fixed inset-0 z-[100]">
+    <!-- 容器 pointer-events-none：引导期间用户仍可真实点击页面元素完成操作；气泡单独恢复交互 -->
+    <div v-if="props.open" class="guide-fade pointer-events-none fixed inset-0 z-[100]">
       <!-- 高亮窗口：box-shadow 挖洞遮罩 + 呼吸高亮边框 -->
       <div
         v-if="currentStep.target && highlight.show"
@@ -243,7 +255,7 @@ defineExpose({ hasCompleted })
       <!-- 气泡 -->
       <div
         v-if="shown"
-        class="guide-pop glass-strong absolute z-[110] w-[320px] rounded-2xl p-5 shadow-2xl"
+        class="guide-pop glass-strong pointer-events-auto absolute z-[110] w-[320px] rounded-2xl p-5 shadow-2xl"
         :style="bubblePos()"
       >
         <div class="flex items-start gap-3">

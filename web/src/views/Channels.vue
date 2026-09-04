@@ -25,9 +25,11 @@ const templates = ref([])
 
 // Toast 通知
 const toast = ref({ show: false, type: 'success', message: '' })
+let toastTimer = null
 function showToast(type, message) {
   toast.value = { show: true, type, message }
-  setTimeout(() => { toast.value.show = false }, 3000)
+  if (toastTimer) clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => { toast.value.show = false }, 3000)
 }
 
 // 卡片上的测试状态
@@ -62,10 +64,16 @@ async function onHealthCheck() {
   healthChecking.value = true
   try {
     await triggerHealth()
-    setTimeout(async () => { await loadHealth(); healthChecking.value = false }, 1500)
+    // 后端「入队即返回」：轮询 /api/health 直到本轮检测结束（检测慢于固定延时很常见）
+    for (let i = 0; i < 30; i++) {
+      await new Promise(r => setTimeout(r, 1000))
+      await loadHealth()
+      if (health.value.summary && !health.value.summary.checking) break
+    }
   } catch (e) {
+    showToast('error', '健康检测失败: ' + (e.message || e))
+  } finally {
     healthChecking.value = false
-    showToast('error', '健康检测失败: ' + e.message)
   }
 }
 
@@ -110,13 +118,15 @@ function openEdit(ch) {
 function onProviderChange() {
   const tpl = templates.value.find(t => t.type === form.value.provider_type)
   if (tpl && !editing.value) {
-    form.value.base_url = tpl.base_url
-    form.value.rpm_limit = tpl.default_rpm
-    form.value.name = tpl.name
+    // 仅在字段为空或仍是其它模板默认值时覆盖，避免抹掉用户已填内容
+    const isTemplateValue = (val, field) => !val || templates.value.some(t => t[field] === val)
+    if (isTemplateValue(form.value.base_url, 'base_url')) form.value.base_url = tpl.base_url
+    if (!form.value.name || templates.value.some(t => t.name === form.value.name)) form.value.name = tpl.name
+    if (!form.value.rpm_limit || templates.value.some(t => t.default_rpm === form.value.rpm_limit)) form.value.rpm_limit = tpl.default_rpm
     // Cloudflare 默认填充 account_id 模板
     if (tpl.type === 'cloudflare') {
       form.value.extra_config = '{\n  "account_id": "your-account-id"\n}'
-    } else {
+    } else if (!form.value.extra_config || form.value.extra_config.trim() === '{}' || form.value.extra_config.includes('your-account-id')) {
       form.value.extra_config = '{}'
     }
   }
@@ -136,17 +146,29 @@ async function save() {
     showToast('error', '额外配置不是合法的 JSON 格式')
     return
   }
+  // 数字字段归一化：清空输入框时 v-model.number 得到 ''，直接提交会被后端当成 0（重试变「不重试」）
+  const numOrUndef = (v, dflt) => {
+    const n = Number(v)
+    return v === '' || v === null || !Number.isFinite(n) ? dflt : n
+  }
+  const payload = {
+    ...form.value,
+    rpm_limit: numOrUndef(form.value.rpm_limit, ''),
+    retry_count: numOrUndef(form.value.retry_count, ''),
+  }
+  if (payload.rpm_limit === '') delete payload.rpm_limit
+  if (payload.retry_count === '') delete payload.retry_count
   try {
     if (editing.value) {
-      await updateChannel(editing.value.id, form.value)
+      await updateChannel(editing.value.id, payload)
       showToast('success', '保存成功')
     } else {
-      await createChannel(form.value)
+      await createChannel(payload)
       showToast('success', '创建成功')
     }
     dialogOpen.value = false
     loadData()
-  } catch (e) { showToast('error', '保存失败: ' + e.message) }
+  } catch (e) { showToast('error', '保存失败: ' + (e.message || e)) }
 }
 
 async function onToggle(ch) {
@@ -383,7 +405,7 @@ onMounted(() => { loadData(); loadHealth() })
         <div>
           <label class="mb-1.5 block text-sm font-medium">API Key <span class="text-destructive">*</span></label>
           <Input v-model="form.api_key" type="password" placeholder="nvapi-xxxxxxxx 或 sk-xxxxxxxx" />
-          <p class="mt-1 text-xs text-muted-foreground">上游服务商的API密钥，<span class="text-amber-600">明文存储在本地 data/store.json</span>，不会上传到任何第三方。以 nvapi- 开头是NVIDIA，以 sk- 开头是OpenAI</p>
+          <p class="mt-1 text-xs text-muted-foreground">上游服务商的API密钥，<span class="text-amber-600">明文存储在本地 data/store.db</span>，不会上传到任何第三方。以 nvapi- 开头是NVIDIA，以 sk- 开头是OpenAI</p>
         </div>
 
         <!-- 额外配置（JSON 格式，所有渠道都可配置） -->

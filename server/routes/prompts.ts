@@ -47,8 +47,10 @@ export function registerPromptRoutes(app: FastifyInstance, ctx: RuntimeContext) 
   app.post('/api/prompts', async (req) => {
     const body = (req.body ?? {}) as Partial<Prompt>;
     const now = new Date().toISOString();
+    // 生成唯一 id：毫秒时间戳放大 + 随机后缀，避免固定取模导致的静默覆盖
+    const id = nextUniqueId((key) => s.get(key) !== undefined);
     const p: Prompt = {
-      id: Date.now() % 100000,
+      id,
       name: String(body.name ?? ''),
       description: String(body.description ?? ''),
       content: String(body.content ?? ''),
@@ -96,6 +98,15 @@ export function registerPromptRoutes(app: FastifyInstance, ctx: RuntimeContext) 
     s.set(PREFIX + id, JSON.stringify(target));
     return { message: '激活成功', data: target };
   });
+}
+
+/** 生成不与现有键冲突的唯一数字 id（毫秒时间戳放大 + 随机后缀） */
+function nextUniqueId(exists: (key: string) => boolean): number {
+  for (let i = 0; i < 100; i++) {
+    const candidate = Date.now() * 100 + Math.floor(Math.random() * 100);
+    if (!exists(PREFIX + candidate)) return candidate;
+  }
+  return Date.now() * 100 + Math.floor(Math.random() * 100);
 }
 
 function safeParse(raw: string): Prompt | null {

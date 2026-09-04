@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { RuntimeContext } from '../context.js';
 import { parseId } from './helpers.js';
@@ -20,6 +20,16 @@ function parseServerLine(line: string): ServerLogEntry {
   const l = line.match(/level=(\w+)/);
   const msg = line.match(/msg="?([^"]*)"?/);
   return { time: t?.[1] ?? '', level: l?.[1] ?? '', message: msg?.[1] ?? line, raw: line };
+}
+
+/** UTC ISO 时间串 → 本地日期串（YYYY-MM-DD），与日志页日期选择器的本地时区一致 */
+function localDateStr(iso: string): string {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso.slice(0, 10);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
 }
 
 export function registerLogRoutes(app: FastifyInstance, ctx: RuntimeContext) {
@@ -56,6 +66,8 @@ export function registerLogRoutes(app: FastifyInstance, ctx: RuntimeContext) {
   });
 
   // ===== 服务运行日志 =====
+  // 按 mtime 缓存整个日志文件的解析结果，避免 dashboard/日志页轮询时反复同步读大文件
+  let logCache: { file: string; mtimeMs: number; size: number; entries: ServerLogEntry[] } | null = null;
   const readServerLog = (): ServerLogEntry[] => {
     // 优先 Node 新日志，兼容旧 data/server.log
     const candidates = [
@@ -63,9 +75,23 @@ export function registerLogRoutes(app: FastifyInstance, ctx: RuntimeContext) {
       join(ctx.config.baseDir, 'data', 'server.log'),
     ];
     const file = candidates.find((p) => existsSync(p));
-    if (!file) return [];
-    const text = readFileSync(file, 'utf-8');
-    return text.split(/\r?\n/).filter(Boolean).map(parseServerLine);
+    if (!file) {
+      logCache = null;
+      return [];
+    }
+    try {
+      const st = statSync(file);
+      if (logCache && logCache.file === file && logCache.mtimeMs === st.mtimeMs && logCache.size === st.size) {
+        return logCache.entries;
+      }
+      const text = readFileSync(file, 'utf-8');
+      const entries = text.split(/\r?\n/).filter(Boolean).map(parseServerLine);
+      logCache = { file, mtimeMs: st.mtimeMs, size: st.size, entries };
+      return entries;
+    } catch {
+      // 读取/滚动窗口期：退回上一次缓存
+      return logCache?.entries ?? [];
+    }
   };
 
   app.get('/api/server-logs', async (req) => {
@@ -82,7 +108,8 @@ export function registerLogRoutes(app: FastifyInstance, ctx: RuntimeContext) {
     const filtered = readServerLog().filter((e) => {
       if (level && e.level !== level) return false;
       if (keyword && !e.raw.toLowerCase().includes(keyword)) return false;
-      const d = e.time.slice(0, 10);
+      // 日志时间戳为 UTC ISO，与用户输入的本地日期比较前先换算成本地日期
+      const d = localDateStr(e.time);
       if (startDate && d < startDate) return false;
       if (endDate && d > endDate) return false;
       return true;

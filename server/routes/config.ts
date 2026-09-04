@@ -53,11 +53,27 @@ export function registerConfigRoutes(app: FastifyInstance, ctx: RuntimeContext) 
           db.prepare('DELETE FROM models').run();
           db.prepare('DELETE FROM channels').run();
         }
+        // 预建索引（事务内逐条查全表是 O(n²)，大配置会长时间阻塞事件循环）
+        const byName = new Map<string, ChannelDTO[]>();
+        if (!replace) {
+          for (const c of chRepo.list()) {
+            const l = byName.get(c.name) ?? [];
+            l.push(c);
+            byName.set(c.name, l);
+          }
+        }
+        const existingModelKeys = new Set<string>();
+        if (!replace) {
+          for (const m of mRepo.listAll()) existingModelKeys.add(`${m.channel_id}::${m.model_id}`);
+        }
+        const payloadModelKeys = new Set<string>();
+
         // 旧导出 ID -> 新渠道 ID 映射
         const idMap = new Map<number, number>();
         let importedChannels = 0;
         for (const c of parsed.channels) {
-          const existing = chRepo.list().find((x) => x.name === c.name && (!c.base_url || x.base_url === c.base_url));
+          const candidates = byName.get(c.name) ?? [];
+          const existing = candidates.find((x) => !c.base_url || x.base_url === c.base_url);
           if (existing && !replace) {
             idMap.set(c.id, existing.id);
             continue;
@@ -79,8 +95,10 @@ export function registerConfigRoutes(app: FastifyInstance, ctx: RuntimeContext) 
         let importedModels = 0;
         for (const m of parsed.models) {
           const newChannelId = idMap.get(m.channel_id) ?? m.channel_id;
-          const exists = mRepo.listByChannel(newChannelId).some((x) => x.model_id === m.model_id);
-          if (exists && !replace) continue;
+          const key = `${newChannelId}::${m.model_id}`;
+          // 既有模型在 merge 模式下跳过；payload 内部重复也跳过（唯一索引会让整个导入回滚 500）
+          if (payloadModelKeys.has(key) || (!replace && existingModelKeys.has(key))) continue;
+          payloadModelKeys.add(key);
           mRepo.create({
             model_id: m.model_id,
             alias: m.alias,

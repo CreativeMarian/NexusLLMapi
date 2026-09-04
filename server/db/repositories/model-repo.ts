@@ -40,8 +40,9 @@ export class ModelRepository {
       params.push(q.modalType);
     }
     if (q.tag) {
-      conds.push('tags LIKE ?');
-      params.push(`%"${q.tag}"%`);
+      conds.push("tags LIKE ? ESCAPE '\\'");
+      // 转义用户输入中的 LIKE 通配符，避免 %/_ 被当作通配符造成误匹配
+      params.push(`%"${q.tag.replace(/[\\%_]/g, (c) => '\\' + c)}"%`);
     }
     if (q.channelId) {
       conds.push('channel_id = ?');
@@ -65,8 +66,10 @@ export class ModelRepository {
     return { list: rows.map(modelToDTO), total };
   }
 
+  /** 全量模型（无分页上限）：路由池索引 / 导出 / 统计都依赖它，截断会导致模型无法路由 */
   listAll(): ModelDTO[] {
-    return this.query({ page: 1, pageSize: 500 }).list;
+    const rows = this.db.prepare('SELECT * FROM models ORDER BY id ASC').all() as ModelRow[];
+    return rows.map(modelToDTO);
   }
 
   listEnabled(): ModelDTO[] {

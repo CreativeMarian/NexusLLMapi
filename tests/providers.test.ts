@@ -128,7 +128,7 @@ describe('ProviderService 通过真实 Transport 与 mock 上游联调', () => {
     }
   });
 
-  it('testChannel：azure 渠道 → 上游收到 api-key 头且无 Bearer', async () => {
+  it('testChannel：azure 渠道 → 上游收到 api-key 头且无 Bearer（deployments 端点带 api-version）', async () => {
     const mock = await startMockUpstream();
     mocks.push(mock);
     const b = makeCtx(tempBase());
@@ -136,7 +136,9 @@ describe('ProviderService 通过真实 Transport 与 mock 上游联调', () => {
       seedChannel(b.ctx, { name: 'az', provider_type: 'azure', base_url: mock.base, api_key: 'AZKEY' });
       const svc = new ProviderService(b.ctx);
       await svc.testChannel(1);
-      const req = mock.requests.find((x) => x.method === 'GET' && x.url.endsWith('/models'));
+      // Azure 的模型列表走 /deployments 端点，并自动补 api-version 查询参数
+      const req = mock.requests.find((x) => x.method === 'GET' && x.url.includes('/deployments?api-version='));
+      expect(req).toBeTruthy();
       expect(req?.headers['api-key']).toBe('AZKEY');
       expect(req?.headers.authorization).toBeUndefined();
     } finally {

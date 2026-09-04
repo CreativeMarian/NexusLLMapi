@@ -38,6 +38,17 @@ export class Transport {
     if (!agent) {
       agent = new SocksProxyAgent(proxy);
       this.agentCache.set(proxy, agent);
+      // 代理地址变更后清理旧 agent，避免反复改配置泄漏连接池
+      for (const [key, old] of this.agentCache) {
+        if (key !== proxy) {
+          this.agentCache.delete(key);
+          try {
+            (old as { destroy?: () => void }).destroy?.();
+          } catch {
+            /* ignore */
+          }
+        }
+      }
       logger.info('Transport 创建 SOCKS5 Agent', { proxy: maskProxy(proxy) });
     }
     return agent;

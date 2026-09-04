@@ -4,6 +4,9 @@ import type { Gateway } from '../gateway/gateway.js';
 export function registerGatewayRoutes(app: FastifyInstance, gw: Gateway) {
   app.post('/v1/chat/completions', (req, reply) => gw.handleChat(req, reply, 'openai'));
   app.post('/v1/embeddings', (req, reply) => gw.handleEmbeddings(req, reply));
+  // 媒体生成（图片 / 视频）：OpenAI 风格 /v1/images/generations 与 /v1/video/generations
+  app.post('/v1/images/generations', (req, reply) => gw.handleMediaGeneration(req, reply, 'images/generations'));
+  app.post('/v1/video/generations', (req, reply) => gw.handleMediaGeneration(req, reply, 'video/generations'));
   app.get('/v1/models', async (_req, reply) => reply.send(gw.listModels()));
 
   // 临时诊断：路由池内部状态

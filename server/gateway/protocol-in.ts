@@ -190,15 +190,41 @@ export function openaiToAnthropic(openaiBody: string, reqModel: string): string 
   });
 }
 
+/** 上游错误体 → Anthropic error 结构（Claude Code 等 Anthropic 客户端依赖该结构解析错误信息） */
+export function openaiErrorToAnthropic(openaiBody: string, status: number): string {
+  let message = 'upstream error';
+  try {
+    const o = JSON.parse(openaiBody) as { error?: { message?: string } | string; message?: string };
+    if (o.error && typeof o.error === 'object' && o.error.message) message = String(o.error.message);
+    else if (typeof o.error === 'string') message = o.error;
+    else if (typeof o.message === 'string' && o.message) message = o.message;
+  } catch {
+    if (openaiBody.trim()) message = openaiBody.slice(0, 500);
+  }
+  const type =
+    status === 400
+      ? 'invalid_request_error'
+      : status === 401 || status === 403
+        ? 'authentication_error'
+        : status === 404
+          ? 'not_found_error'
+          : status === 429
+            ? 'rate_limit_error'
+            : status >= 500
+              ? 'api_error'
+              : 'api_error';
+  return JSON.stringify({ type: 'error', error: { type, message } });
+}
+
 /** Anthropic SSE 有状态转换器：逐 chunk 输入 OpenAI SSE data，输出 Anthropic 事件文本。
- *  支持文本 delta 与 tool_calls（tool_use block + input_json_delta + block_stop）。 */
-export class AnthropicSseConverter {
+ *  支持文本 delta 与 tool_calls（tool_use block + input_json_delta + block_stop）。 */export class AnthropicSseConverter {
   private msgId = `msg_${randomId()}`;
   private started = false;
   private textBlockOpen = false;
   private textIndex = 0;
   private nextIndex = 1; // 文本块占 0，工具块从 1 起
   private toolBlocks = new Map<number, { anthIndex: number; id: string; name: string }>(); // openaiToolIdx -> anth 信息
+  private openToolIndex: number | null = null; // 当前仍打开的 tool 块（openai 侧 index）
   private finished = false;
   private inputTokens = 0;
   private outputTokens = 0;
@@ -256,11 +282,17 @@ export class AnthropicSseConverter {
       const fn = (tc.function ?? {}) as AnyObj;
       let tb = this.toolBlocks.get(idx);
       if (!tb) {
-        // 打开新 tool block 前先关闭文本块（Anthropic content 顺序要求）
+        // 打开新 block 前先关闭已打开的文本块（Anthropic content 顺序要求）
         if (this.textBlockOpen) {
           this.textBlockOpen = false;
           out += this.event('content_block_stop', { type: 'content_block_stop', index: this.textIndex });
         }
+        // Anthropic 要求块按顺序 start→stop；并行工具调用时关闭上一个仍打开的 tool 块
+        if (this.openToolIndex !== null && this.openToolIndex !== idx) {
+          const prev = this.toolBlocks.get(this.openToolIndex);
+          if (prev) out += this.event('content_block_stop', { type: 'content_block_stop', index: prev.anthIndex });
+        }
+        this.openToolIndex = idx;
         tb = { anthIndex: this.nextIndex++, id: String(tc.id ?? `toolu_${randomId()}`), name: String(fn.name ?? '') };
         this.toolBlocks.set(idx, tb);
         out += this.event('content_block_start', {
@@ -291,13 +323,15 @@ export class AnthropicSseConverter {
     if (this.finished) return '';
     this.finished = true;
     let out = '';
-    // 关闭所有已打开 block（先 tool 后 text，或按 open 顺序）
+    // 关闭所有已打开 block（text 在前；tool 块仅关闭尚未关闭的最后一个，其余已在流中按序关闭）
     if (this.textBlockOpen) {
       this.textBlockOpen = false;
       out += this.event('content_block_stop', { type: 'content_block_stop', index: this.textIndex });
     }
-    for (const tb of [...this.toolBlocks.values()].sort((a, b) => a.anthIndex - b.anthIndex)) {
-      out += this.event('content_block_stop', { type: 'content_block_stop', index: tb.anthIndex });
+    if (this.openToolIndex !== null) {
+      const tb = this.toolBlocks.get(this.openToolIndex);
+      if (tb) out += this.event('content_block_stop', { type: 'content_block_stop', index: tb.anthIndex });
+      this.openToolIndex = null;
     }
     out += this.event('message_delta', {
       type: 'message_delta',
@@ -397,7 +431,11 @@ export function responsesToOpenAI(bodyStr: string): InboundConvertResult {
 
   const openai: AnyObj = { model, messages, stream };
   copyIfPresent(r, openai, ['temperature', 'top_p', 'max_output_tokens', 'max_tokens']);
-  if (openai.max_output_tokens && !openai.max_tokens) openai.max_tokens = openai.max_output_tokens;
+  if (openai.max_output_tokens !== undefined && openai.max_tokens === undefined) {
+    openai.max_tokens = openai.max_output_tokens;
+  }
+  // max_output_tokens 是 Responses 协议参数，chat/completions 上游不认识（严格上游会 400），映射后必须移除
+  delete openai.max_output_tokens;
   const tools = responsesToolsToOpenAI(r.tools);
   if (tools) openai.tools = tools;
   const toolChoice = responsesToolChoiceToOpenAI(r.tool_choice);
@@ -450,12 +488,14 @@ export function openaiToResponses(openaiBody: string, reqModel: string): string 
   });
 }
 
-/** Responses SSE 转换器：文本 delta + function_call（tool_calls → function_call 输出项与参数 delta） */
+/** Responses SSE 转换器：文本 delta + function_call（tool_calls → function_call 输出项与参数 delta，支持并行多工具） */
 export class ResponsesSseConverter {
   private respId = `resp_${randomId()}`;
+  private msgItemId = `msg_${randomId()}`;
   private started = false;
   private finished = false;
-  private fcState: { itemId: string; callId: string; name: string; open: boolean } | null = null;
+  /** openai 侧 tool index → function_call 输出项状态（并行工具调用各自独立 item） */
+  private fcItems = new Map<number, { itemId: string; callId: string; name: string }>();
 
   feed(openaiData: string): string {
     if (openaiData === '[DONE]') return '';
@@ -475,11 +515,11 @@ export class ResponsesSseConverter {
       out += this.evt('response.output_item.added', {
         type: 'response.output_item.added',
         output_index: 0,
-        item: { id: `msg_${randomId()}`, type: 'message', status: 'in_progress', role: 'assistant', content: [] },
+        item: { id: this.msgItemId, type: 'message', status: 'in_progress', role: 'assistant', content: [] },
       });
       out += this.evt('response.content_part.added', {
         type: 'response.content_part.added',
-        item_id: `msg_${randomId()}`,
+        item_id: this.msgItemId,
         output_index: 0,
         content_index: 0,
         part: { type: 'output_text', text: '' },
@@ -496,28 +536,29 @@ export class ResponsesSseConverter {
         delta: text,
       });
     }
-    // tool_calls → function_call 输出项（含多 tool call：按 index 区分，逐个输出项追加）
+    // tool_calls → function_call 输出项（按 index 区分多工具，各自独立 item 与参数流）
     const tcs = (delta.tool_calls as AnyObj[] | undefined) ?? [];
     for (const tc of tcs) {
+      const idx = Number(tc.index ?? 0);
       const fn = (tc.function ?? {}) as AnyObj;
       const name = String(fn.name ?? '');
       const args = fn.arguments;
-      // 新工具：打开 function_call 输出项（name 出现时）
-      if (name) {
-        // 同一输出项上不会重复打开，但不同工具需要各自独立的 item
+      let item = this.fcItems.get(idx);
+      if (!item) {
         const callId = String(tc.id ?? `fc_${randomId()}`);
-        this.fcState = { itemId: `fc_${randomId()}`, callId, name, open: true };
+        item = { itemId: `fc_${randomId()}`, callId, name };
+        this.fcItems.set(idx, item);
         out += this.evt('response.output_item.added', {
           type: 'response.output_item.added',
-          output_index: 1 + Number(tc.index ?? 0),
-          item: { id: this.fcState.itemId, type: 'function_call', status: 'in_progress', call_id: callId, name, arguments: '' },
+          output_index: 1 + idx,
+          item: { id: item.itemId, type: 'function_call', status: 'in_progress', call_id: callId, name, arguments: '' },
         });
       }
-      if (typeof args === 'string' && args && this.fcState) {
+      if (typeof args === 'string' && args) {
         out += this.evt('response.function_call_arguments.delta', {
           type: 'response.function_call_arguments.delta',
-          output_index: 1 + Number(tc.index ?? 0),
-          item_id: this.fcState.itemId,
+          output_index: 1 + idx,
+          item_id: item.itemId,
           delta: args,
         });
       }
@@ -536,17 +577,22 @@ export class ResponsesSseConverter {
       content_index: 0,
       part: { type: 'output_text', text: '' },
     });
-    out += this.evt('response.output_item.done', { type: 'response.output_item.done', output_index: 0, item: { type: 'message', role: 'assistant' } });
-    if (this.fcState) {
+    out += this.evt('response.output_item.done', {
+      type: 'response.output_item.done',
+      output_index: 0,
+      item: { id: this.msgItemId, type: 'message', status: 'completed', role: 'assistant' },
+    });
+    // 逐个关闭全部 function_call 输出项（按 output_index 顺序）
+    for (const [idx, item] of [...this.fcItems.entries()].sort((a, b) => a[0] - b[0])) {
       out += this.evt('response.function_call_arguments.done', {
         type: 'response.function_call_arguments.done',
-        output_index: 1,
-        item_id: this.fcState.itemId,
+        output_index: 1 + idx,
+        item_id: item.itemId,
       });
       out += this.evt('response.output_item.done', {
         type: 'response.output_item.done',
-        output_index: 1,
-        item: { type: 'function_call', call_id: this.fcState.callId, name: this.fcState.name, arguments: '' },
+        output_index: 1 + idx,
+        item: { id: item.itemId, type: 'function_call', status: 'completed', call_id: item.callId, name: item.name, arguments: '' },
       });
     }
     out += this.evt('response.completed', {

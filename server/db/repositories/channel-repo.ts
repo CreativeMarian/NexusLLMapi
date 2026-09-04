@@ -61,10 +61,13 @@ export class ChannelRepository {
     const existing = this.getRaw(id);
     if (!existing) return null;
     const now = nowDb();
+    // 显式 enabled:true 即视为重新启用：必须清除持久化熔断（disabled_until），否则 rebuild 会把渠道重新拉回冷却
+    const enableNow = input.enabled === true;
     this.db
       .prepare(
         `UPDATE channels SET name=@name, provider_type=@provider_type, base_url=@base_url, api_key=@api_key,
-           extra_config=@extra_config, enabled=@enabled, rpm_limit=@rpm_limit, retry_count=@retry_count, updated_at=@now
+           extra_config=@extra_config, enabled=@enabled, rpm_limit=@rpm_limit, retry_count=@retry_count,
+           disabled_until=${enableNow ? 'NULL' : 'disabled_until'}, updated_at=@now
          WHERE id=@id`,
       )
       .run({
@@ -92,7 +95,12 @@ export class ChannelRepository {
   }
 
   toggle(id: number, enabled: boolean): void {
-    this.db.prepare('UPDATE channels SET enabled = ?, updated_at = ? WHERE id = ?').run(enabled ? 1 : 0, nowDb(), id);
+    // 重新启用时同步清除持久化熔断，保证手动启用立即生效
+    this.db
+      .prepare(
+        `UPDATE channels SET enabled = ?, disabled_until = ${enabled ? 'NULL' : 'disabled_until'}, updated_at = ? WHERE id = ?`,
+      )
+      .run(enabled ? 1 : 0, nowDb(), id);
   }
 
   setDisabledUntil(id: number, dbTime: string | null): void {

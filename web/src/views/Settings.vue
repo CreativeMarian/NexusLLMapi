@@ -33,10 +33,12 @@ async function loadData() {
 async function save() {
   saving.value = true
   try {
-    await updateSettings(form.value)
+    const res = await updateSettings(form.value)
+    // 回填服务端钳制后的值（如 request_timeout<5 会被钳到 5），保持界面与实际生效一致
+    if (res?.data) form.value = { ...form.value, ...res.data }
     saved.value = true
     setTimeout(() => saved.value = false, 2000)
-  } catch (e) { alert('保存失败: ' + e.message) }
+  } catch (e) { alert('保存失败: ' + (e.message || e)) }
   finally { saving.value = false }
 }
 
@@ -147,7 +149,7 @@ onMounted(loadData)
             <div>
               <label class="mb-1.5 block text-sm font-medium">服务端口</label>
               <Input v-model.number="form.port" type="number" />
-              <p class="mt-1 text-xs text-muted-foreground">修改后需重启服务生效</p>
+              <p class="mt-1 text-xs text-muted-foreground">保存后写入配置文件，重启服务生效</p>
             </div>
             <div class="flex items-center justify-between rounded-lg border border-border/50 p-3">
               <div>

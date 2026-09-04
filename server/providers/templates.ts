@@ -86,4 +86,4 @@ export function inferTier(modelId: string, modalType?: string): CapabilityTier {
 }
 
 /** 固定分类标签（与旧 models.AllTags 对齐） */
-export const ALL_TAGS = ['代码生成', '文本分析', '文本生成', '对话', '图像', '视频'];
+export const ALL_TAGS = ['代码生成', '文本分析', '文本生成', '对话', '图像', '视频', '翻译', '摘要', '数学', '推理', '写作', '数据分析', 'Agent'];
