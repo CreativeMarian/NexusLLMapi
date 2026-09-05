@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, watch, nextTick } from 'vue'
 import {
   getModels, toggleModel, batchToggleModels, updateModel,
   getModelTags, testModelSpeed, deleteModel,
@@ -63,6 +63,16 @@ const deleteDialog = ref(false)
 const deletingModel = ref(null)
 const deletingIds = ref([])
 const deleteText = ref('')
+
+// 弹窗打开后自动 focus 到确认输入框，引导用户输入"删除"
+watch(deleteDialog, (v) => {
+  if (v) {
+    nextTick(() => {
+      const input = document.querySelector('.glass-strong input')
+      if (input) input.focus()
+    })
+  }
+})
 
 const modalTypeOptions = [
   { value: '', label: '全部模态' },
